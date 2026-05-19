@@ -1,0 +1,4 @@
+interface:
+  display_name: "Implement Feature"
+  short_description: "Structured multi-agent feature delivery"
+  default_prompt: "Use $implement-feature to explore, plan, implement, and critique a scoped feature in this repository."
