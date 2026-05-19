@@ -53,6 +53,15 @@ def parse_args() -> argparse.Namespace:
         help="Override algorithm.eval_rollout_epoch. Defaults to config value.",
     )
     parser.add_argument(
+        "--eval-step-limit",
+        type=int,
+        default=None,
+        help=(
+            "Override env.eval.max_episode_steps, env.eval.max_steps_per_rollout_epoch, "
+            "and env.eval.task_config.step_lim together."
+        ),
+    )
+    parser.add_argument(
         "--eval-seeds-path",
         default=None,
         help=(
@@ -136,6 +145,28 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="When debug logging is enabled, print the first N env actions of each chunk.",
     )
+    parser.add_argument(
+        "--record-progress",
+        action="store_true",
+        help=(
+            "Record task-specific placement progress metrics such as phone-stand "
+            "distance and gripper state after each chunk."
+        ),
+    )
+    parser.add_argument(
+        "--save-video-dir",
+        default=None,
+        help=(
+            "Optional directory to save rollout videos. One mp4 is written per env "
+            "using the observed head camera frames."
+        ),
+    )
+    parser.add_argument(
+        "--video-fps",
+        type=float,
+        default=2.0,
+        help="FPS used when writing rollout videos.",
+    )
     return parser.parse_args()
 
 
@@ -149,6 +180,7 @@ def main() -> None:
         num_envs=args.num_envs,
         eval_rollout_epochs=args.eval_rollout_epochs,
         eval_seeds_path=args.eval_seeds_path,
+        eval_step_limit=args.eval_step_limit,
         max_chunk_steps=args.max_chunk_steps,
         action_exec_horizon=args.action_exec_horizon,
         visualize=args.visualize,
@@ -158,6 +190,9 @@ def main() -> None:
         device=args.device,
         debug_log_chunks=args.debug_log_chunks,
         debug_action_steps=args.debug_action_steps,
+        record_progress=args.record_progress,
+        save_video_dir=args.save_video_dir,
+        video_fps=args.video_fps,
     )
     save_eval_result(result, args.output_json)
     print(json.dumps(result, ensure_ascii=False, indent=2))

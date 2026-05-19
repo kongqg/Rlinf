@@ -73,8 +73,7 @@ env:
   group_name: "EnvGroup"
   enable_offload: true
   train:
-    # Keep the local default smaller than the upstream RoboTwin recipe.
-    total_num_envs: 8
+    total_num_envs: 256
     reward_coef: ${algorithm.reward_coef}
     max_episode_steps: 200
     max_steps_per_rollout_epoch: 200
@@ -95,8 +94,7 @@ env:
         random_light: false
         crazy_random_light_rate: 0
   eval:
-    # Keep the local default smaller than the upstream RoboTwin recipe.
-    total_num_envs: 8
+    total_num_envs: 128
     auto_reset: true
     ignore_terminations: true
     max_episode_steps: 200
@@ -137,9 +135,8 @@ rollout:
 actor:
   group_name: "ActorGroup"
   training_backend: "fsdp"
-  # Keep the local default smaller than the upstream RoboTwin recipe.
-  micro_batch_size: 1
-  global_batch_size: 8
+  micro_batch_size: 32
+  global_batch_size: 2048
   seed: 1234
   enable_offload: true
   model:

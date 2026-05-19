@@ -67,6 +67,7 @@ def load_eval_cfg(
     num_envs: int | None = None,
     eval_rollout_epochs: int | None = None,
     eval_seeds_path: str | None = None,
+    eval_step_limit: int | None = None,
     visualize: bool = False,
     render_freq: int = 10,
 ):
@@ -91,6 +92,11 @@ def load_eval_cfg(
         with open_dict(cfg.env.eval):
             cfg.env.eval.seeds_path = str(Path(eval_seeds_path).expanduser().resolve())
             cfg.env.eval.use_fixed_reset_state_ids = True
+    if eval_step_limit is not None:
+        with open_dict(cfg.env.eval):
+            cfg.env.eval.max_episode_steps = int(eval_step_limit)
+            cfg.env.eval.max_steps_per_rollout_epoch = int(eval_step_limit)
+            cfg.env.eval.task_config.step_lim = int(eval_step_limit)
     if visualize:
         with open_dict(cfg.env.eval):
             cfg.env.eval.visualize = True
@@ -154,6 +160,261 @@ def _debug_value(value: Any) -> Any:
     return value
 
 
+def _to_rgb_frame(image: torch.Tensor | np.ndarray) -> np.ndarray:
+    if isinstance(image, torch.Tensor):
+        frame = image.detach().cpu().numpy()
+    else:
+        frame = np.asarray(image)
+    if frame.ndim == 3 and frame.shape[0] in (1, 3) and frame.shape[-1] not in (1, 3):
+        frame = np.moveaxis(frame, 0, -1)
+    frame = np.asarray(frame)
+    if frame.dtype != np.uint8:
+        frame = np.clip(frame, 0, 255).astype(np.uint8)
+    return frame
+
+
+def _capture_obs_frames(obs: dict[str, Any]) -> list[np.ndarray]:
+    if "main_images" not in obs or obs["main_images"] is None:
+        return []
+    return [_to_rgb_frame(frame) for frame in obs["main_images"]]
+
+
+def _extract_place_phone_stand_progress(env: RoboTwinEnv) -> list[dict[str, Any]]:
+    progress = []
+    sub_envs = getattr(getattr(env, "venv", None), "envs", [])
+    for env_idx, sub_env in enumerate(sub_envs):
+        task = getattr(sub_env, "task", None)
+        snapshot: dict[str, Any] = {"env_idx": env_idx}
+        if task is None:
+            progress.append(snapshot)
+            continue
+
+        phone = getattr(task, "phone", None)
+        stand = getattr(task, "stand", None)
+        if phone is not None and stand is not None:
+            phone_pose = np.asarray(phone.get_pose().p, dtype=np.float64)[:3]
+            phone_func_pose = np.asarray(phone.get_functional_point(0), dtype=np.float64)[:3]
+            stand_func_pose = np.asarray(stand.get_functional_point(0), dtype=np.float64)[:3]
+            delta = phone_func_pose - stand_func_pose
+            snapshot["phone_pose"] = phone_pose.tolist()
+            snapshot["phone_func_pose"] = phone_func_pose.tolist()
+            snapshot["stand_func_pose"] = stand_func_pose.tolist()
+            snapshot["xyz_abs_error"] = np.abs(delta).tolist()
+            snapshot["l2_distance"] = float(np.linalg.norm(delta))
+            snapshot["phone_height"] = float(phone_pose[2])
+
+            robot = getattr(task, "robot", None)
+            if robot is not None:
+                try:
+                    left_tcp = np.asarray(robot.get_left_tcp_pose()[:3], dtype=np.float64)
+                    right_tcp = np.asarray(robot.get_right_tcp_pose()[:3], dtype=np.float64)
+                    active_arm = "left" if float(phone_pose[0]) < 0 else "right"
+                    active_tcp = left_tcp if active_arm == "left" else right_tcp
+                    snapshot["active_arm"] = active_arm
+                    snapshot["active_tcp_pose"] = active_tcp.tolist()
+                    snapshot["tcp_phone_l2"] = float(np.linalg.norm(active_tcp - phone_pose))
+                except Exception:
+                    pass
+
+        if hasattr(task, "is_left_gripper_open"):
+            snapshot["left_gripper_open"] = bool(task.is_left_gripper_open())
+        if hasattr(task, "is_right_gripper_open"):
+            snapshot["right_gripper_open"] = bool(task.is_right_gripper_open())
+        if hasattr(task, "episode_left_gripper_state"):
+            snapshot["chunk_left_gripper_trace"] = [
+                bool(v) for v in getattr(task, "episode_left_gripper_state", [])
+            ]
+        if hasattr(task, "episode_right_gripper_state"):
+            snapshot["chunk_right_gripper_trace"] = [
+                bool(v) for v in getattr(task, "episode_right_gripper_state", [])
+            ]
+        if hasattr(task, "run_steps"):
+            snapshot["run_steps"] = int(task.run_steps)
+
+        try:
+            snapshot["success_now"] = bool(task.check_success())
+        except Exception:
+            pass
+
+        progress.append(snapshot)
+    return progress
+
+
+def _append_progress_history(
+    progress_history: list[list[dict[str, Any]]],
+    chunk_idx: int,
+    snapshots: list[dict[str, Any]],
+) -> None:
+    for snapshot in snapshots:
+        env_idx = int(snapshot["env_idx"])
+        event = {"chunk_idx": chunk_idx}
+        event.update(snapshot)
+        progress_history[env_idx].append(event)
+
+
+def _summarize_progress_history(
+    progress_history: list[list[dict[str, Any]]],
+) -> dict[str, Any]:
+    per_env = []
+    aggregate_initial_l2 = []
+    aggregate_min_l2 = []
+    aggregate_final_l2 = []
+    aggregate_initial_tcp_phone = []
+    aggregate_min_tcp_phone = []
+    aggregate_final_tcp_phone = []
+    aggregate_max_phone_displacement = []
+    aggregate_max_phone_height_gain = []
+
+    for env_idx, history in enumerate(progress_history):
+        env_summary: dict[str, Any] = {
+            "env_idx": env_idx,
+            "num_snapshots": len(history),
+            "history": history,
+        }
+        l2_values = [float(item["l2_distance"]) for item in history if "l2_distance" in item]
+        tcp_phone_values = [float(item["tcp_phone_l2"]) for item in history if "tcp_phone_l2" in item]
+        xyz_values = [np.asarray(item["xyz_abs_error"], dtype=np.float64) for item in history if "xyz_abs_error" in item]
+        phone_pose_values = [np.asarray(item["phone_pose"], dtype=np.float64) for item in history if "phone_pose" in item]
+        phone_height_values = [float(item["phone_height"]) for item in history if "phone_height" in item]
+        left_values = [bool(item["left_gripper_open"]) for item in history if "left_gripper_open" in item]
+        right_values = [bool(item["right_gripper_open"]) for item in history if "right_gripper_open" in item]
+        success_values = [bool(item["success_now"]) for item in history if "success_now" in item]
+        active_arm = next((str(item["active_arm"]) for item in history if "active_arm" in item), None)
+
+        if l2_values:
+            env_summary["initial_l2_distance"] = l2_values[0]
+            env_summary["min_l2_distance"] = min(l2_values)
+            env_summary["final_l2_distance"] = l2_values[-1]
+            aggregate_initial_l2.append(l2_values[0])
+            aggregate_min_l2.append(min(l2_values))
+            aggregate_final_l2.append(l2_values[-1])
+        if tcp_phone_values:
+            env_summary["initial_tcp_phone_l2"] = tcp_phone_values[0]
+            env_summary["min_tcp_phone_l2"] = min(tcp_phone_values)
+            env_summary["final_tcp_phone_l2"] = tcp_phone_values[-1]
+            env_summary["tcp_phone_delta_to_min"] = tcp_phone_values[0] - min(tcp_phone_values)
+            aggregate_initial_tcp_phone.append(tcp_phone_values[0])
+            aggregate_min_tcp_phone.append(min(tcp_phone_values))
+            aggregate_final_tcp_phone.append(tcp_phone_values[-1])
+        if xyz_values:
+            stacked_xyz = np.stack(xyz_values, axis=0)
+            env_summary["initial_xyz_abs_error"] = stacked_xyz[0].tolist()
+            env_summary["min_xyz_abs_error"] = stacked_xyz.min(axis=0).tolist()
+            env_summary["final_xyz_abs_error"] = stacked_xyz[-1].tolist()
+        if phone_pose_values:
+            phone_pose_stack = np.stack(phone_pose_values, axis=0)
+            displacement = np.linalg.norm(phone_pose_stack - phone_pose_stack[0], axis=1)
+            env_summary["initial_phone_pose"] = phone_pose_stack[0].tolist()
+            env_summary["final_phone_pose"] = phone_pose_stack[-1].tolist()
+            env_summary["max_phone_displacement"] = float(displacement.max())
+            env_summary["final_phone_displacement"] = float(displacement[-1])
+            aggregate_max_phone_displacement.append(float(displacement.max()))
+        if phone_height_values:
+            initial_height = phone_height_values[0]
+            max_height = max(phone_height_values)
+            env_summary["initial_phone_height"] = initial_height
+            env_summary["max_phone_height"] = max_height
+            env_summary["final_phone_height"] = phone_height_values[-1]
+            env_summary["max_phone_height_gain"] = max_height - initial_height
+            aggregate_max_phone_height_gain.append(max_height - initial_height)
+        if left_values:
+            env_summary["initial_left_gripper_open"] = left_values[0]
+            env_summary["ever_left_gripper_open"] = any(left_values)
+            env_summary["final_left_gripper_open"] = left_values[-1]
+        if right_values:
+            env_summary["initial_right_gripper_open"] = right_values[0]
+            env_summary["ever_right_gripper_open"] = any(right_values)
+            env_summary["final_right_gripper_open"] = right_values[-1]
+        if success_values:
+            env_summary["ever_success"] = any(success_values)
+            env_summary["final_success"] = success_values[-1]
+        if active_arm is not None:
+            env_summary["active_arm"] = active_arm
+
+        env_summary["stage"] = _classify_place_phone_stand_progress(env_summary)
+
+        per_env.append(env_summary)
+
+    aggregate: dict[str, Any] = {"num_envs": len(per_env)}
+    if aggregate_initial_l2:
+        aggregate["mean_initial_l2_distance"] = float(np.mean(aggregate_initial_l2))
+        aggregate["mean_min_l2_distance"] = float(np.mean(aggregate_min_l2))
+        aggregate["mean_final_l2_distance"] = float(np.mean(aggregate_final_l2))
+    if aggregate_initial_tcp_phone:
+        aggregate["mean_initial_tcp_phone_l2"] = float(np.mean(aggregate_initial_tcp_phone))
+        aggregate["mean_min_tcp_phone_l2"] = float(np.mean(aggregate_min_tcp_phone))
+        aggregate["mean_final_tcp_phone_l2"] = float(np.mean(aggregate_final_tcp_phone))
+    if aggregate_max_phone_displacement:
+        aggregate["mean_max_phone_displacement"] = float(
+            np.mean(aggregate_max_phone_displacement)
+        )
+    if aggregate_max_phone_height_gain:
+        aggregate["mean_max_phone_height_gain"] = float(
+            np.mean(aggregate_max_phone_height_gain)
+        )
+    aggregate["stage_counts"] = dict(
+        sorted(
+            (
+                (stage, sum(1 for env_summary in per_env if env_summary.get("stage") == stage))
+                for stage in {env_summary.get("stage", "unknown") for env_summary in per_env}
+            ),
+            key=lambda item: item[0],
+        )
+    )
+
+    return {"per_env": per_env, "aggregate": aggregate}
+
+
+def _classify_place_phone_stand_progress(env_summary: dict[str, Any]) -> str:
+    if env_summary.get("final_success") or env_summary.get("ever_success"):
+        return "success"
+
+    max_phone_displacement = float(env_summary.get("max_phone_displacement", 0.0))
+    max_phone_height_gain = float(env_summary.get("max_phone_height_gain", 0.0))
+    min_tcp_phone_l2 = float(env_summary.get("min_tcp_phone_l2", float("inf")))
+    tcp_phone_delta_to_min = float(env_summary.get("tcp_phone_delta_to_min", 0.0))
+
+    if max_phone_displacement > 0.02 or max_phone_height_gain > 0.01:
+        return "moved_phone"
+    if min_tcp_phone_l2 < 0.16 or tcp_phone_delta_to_min > 0.08:
+        return "approached_phone"
+    if min_tcp_phone_l2 < 0.24 or tcp_phone_delta_to_min > 0.02:
+        return "weak_approach"
+    return "no_meaningful_approach"
+
+
+def _write_rollout_videos(
+    *,
+    video_dir: str | Path,
+    video_frames: list[list[np.ndarray]],
+    video_fps: float,
+) -> list[str]:
+    import cv2
+
+    output_dir = Path(video_dir).expanduser().resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_paths: list[str] = []
+
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    for env_idx, frames in enumerate(video_frames):
+        if not frames:
+            continue
+        first = frames[0]
+        height, width = first.shape[:2]
+        output_path = output_dir / f"env{env_idx:02d}.mp4"
+        writer = cv2.VideoWriter(str(output_path), fourcc, float(video_fps), (width, height))
+        if not writer.isOpened():
+            raise RuntimeError(f"Failed to open video writer for {output_path}")
+        try:
+            for frame in frames:
+                writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+        finally:
+            writer.release()
+        output_paths.append(str(output_path))
+
+    return output_paths
+
+
 def run_robotwin_policy_eval(
     *,
     config_name: str,
@@ -163,6 +424,7 @@ def run_robotwin_policy_eval(
     num_envs: int | None = None,
     eval_rollout_epochs: int | None = None,
     eval_seeds_path: str | None = None,
+    eval_step_limit: int | None = None,
     max_chunk_steps: int | None = None,
     action_exec_horizon: int | None = None,
     visualize: bool = False,
@@ -172,6 +434,9 @@ def run_robotwin_policy_eval(
     device: str | None = None,
     debug_log_chunks: bool = False,
     debug_action_steps: int = 0,
+    record_progress: bool = False,
+    save_video_dir: str | None = None,
+    video_fps: float = 2.0,
 ) -> dict[str, Any]:
     ensure_robotwin_import_path()
     if visualize:
@@ -184,6 +449,7 @@ def run_robotwin_policy_eval(
         num_envs=num_envs,
         eval_rollout_epochs=eval_rollout_epochs,
         eval_seeds_path=eval_seeds_path,
+        eval_step_limit=eval_step_limit,
         visualize=visualize,
         render_freq=render_freq,
     )
@@ -244,6 +510,8 @@ def run_robotwin_policy_eval(
     eval_metrics = defaultdict(list)
     prev_done = torch.zeros(actual_num_envs, dtype=torch.bool)
     obs = None
+    progress_history: list[list[dict[str, Any]]] = [[] for _ in range(actual_num_envs)]
+    video_frames: list[list[np.ndarray]] = [[] for _ in range(actual_num_envs)]
 
     try:
         with torch.no_grad():
@@ -253,6 +521,15 @@ def run_robotwin_policy_eval(
                     env.is_start = True
                     prev_done = torch.zeros(actual_num_envs, dtype=torch.bool)
                     obs, _ = env.reset()
+                    if save_video_dir is not None:
+                        for env_idx, frame in enumerate(_capture_obs_frames(obs)):
+                            video_frames[env_idx].append(frame)
+                    if record_progress:
+                        _append_progress_history(
+                            progress_history,
+                            chunk_idx=-1,
+                            snapshots=_extract_place_phone_stand_progress(env),
+                        )
 
                 for chunk_idx in range(n_eval_chunk_steps):
                     actions, _result = model.predict_action_batch(
@@ -264,6 +541,15 @@ def run_robotwin_policy_eval(
                     next_obs, _rewards, terminations, truncations, infos = env.step(
                         actions_to_execute, auto_reset=env_cfg.auto_reset
                     )
+                    if save_video_dir is not None:
+                        for env_idx, frame in enumerate(_capture_obs_frames(next_obs)):
+                            video_frames[env_idx].append(frame)
+                    if record_progress:
+                        _append_progress_history(
+                            progress_history,
+                            chunk_idx=chunk_idx,
+                            snapshots=_extract_place_phone_stand_progress(env),
+                        )
 
                     if visualize and sleep_between_chunks > 0:
                         time.sleep(sleep_between_chunks)
@@ -354,6 +640,14 @@ def run_robotwin_policy_eval(
             "render_freq": env_cfg.task_config.render_freq,
             "metrics": summary,
         }
+        if record_progress:
+            result["progress"] = _summarize_progress_history(progress_history)
+        if save_video_dir is not None:
+            result["video_paths"] = _write_rollout_videos(
+                video_dir=save_video_dir,
+                video_frames=video_frames,
+                video_fps=video_fps,
+            )
     finally:
         if visualize and hold_viewer_seconds > 0:
             print(

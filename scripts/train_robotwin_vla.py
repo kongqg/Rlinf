@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 import json
+import math
 import os
 import random
 import shutil
@@ -77,9 +78,14 @@ class Args:
     eval_config_name: str = "robotwin_place_phone_stand_ppo_openpi_pi05"
     batch_size: int = 8
     grad_accum_steps: int = 1
-    train_steps: int = 2000
-    learning_rate: float = 5.0e-6
-    weight_decay: float = 1.0e-2
+    train_steps: int = 20000
+    learning_rate: float = 2.5e-5
+    min_learning_rate: float = 2.5e-6
+    lr_warmup_steps: int = 1000
+    lr_total_steps: int = 30000
+    lr_num_cycles: float = 0.5
+    lr_scheduler: Literal["none", "cosine"] = "cosine"
+    weight_decay: float = 1.0e-10
     clip_grad_norm: float = 1.0
     log_every: int = 20
     save_every: int = 200
@@ -92,13 +98,15 @@ class Args:
     eval_num_envs: int = 1
     eval_rollout_epochs: int = 1
     eval_seeds_path: str | None = None
+    eval_step_limit: int | None = None
     eval_max_chunk_steps: int | None = None
     eval_action_exec_horizon: int | None = None
+    eval_record_progress: bool = True
     eval_visualize: bool = False
     eval_render_freq: int = 10
     eval_sleep_between_chunks: float = 0.0
     eval_hold_viewer_seconds: float = 0.0
-    eval_device: Literal["cpu", "cuda", "auto"] = "cpu"
+    eval_device: str = "cpu"
     eval_debug_log_chunks: bool = False
     eval_debug_action_steps: int = 0
     action_probe_every: int = 100
@@ -118,6 +126,7 @@ class Args:
     save_optimizer_state: bool = False
     debug_stage_logs: bool = True
     debug_all_ranks: bool = False
+    noise_level: float = 0.5
 
 
 @dataclass(frozen=True)
@@ -733,7 +742,7 @@ def _build_runtime_cfg(args: Args):
             "openpi": {
                 "config_name": args.config_name,
                 "num_images_in_input": 3,
-                "noise_level": 0.3,
+                "noise_level": args.noise_level,
                 "action_chunk": 50,
                 "num_steps": 5,
                 "train_expert_only": False,
@@ -921,6 +930,43 @@ def _loss_from_output(losses: Any, device: torch.device) -> torch.Tensor:
     elif not isinstance(losses, torch.Tensor):
         losses = torch.tensor(losses, dtype=torch.float32, device=device)
     return losses.float().mean()
+
+
+def _learning_rate_for_update(args: Args, update_step: int) -> float:
+    if args.learning_rate <= 0:
+        raise ValueError(f"learning_rate must be positive, got {args.learning_rate}.")
+    if args.min_learning_rate < 0:
+        raise ValueError(
+            f"min_learning_rate must be non-negative, got {args.min_learning_rate}."
+        )
+    if args.min_learning_rate > args.learning_rate:
+        raise ValueError(
+            "min_learning_rate must be <= learning_rate, "
+            f"but got min_learning_rate={args.min_learning_rate} > learning_rate={args.learning_rate}."
+        )
+    if args.lr_scheduler == "none":
+        return args.learning_rate
+
+    total_steps = max(int(args.lr_total_steps), 1)
+    warmup_steps = max(min(int(args.lr_warmup_steps), total_steps), 0)
+    step = min(max(int(update_step), 1), total_steps)
+    if warmup_steps > 0 and step <= warmup_steps:
+        return args.learning_rate * (step / warmup_steps)
+    if total_steps == warmup_steps:
+        return args.learning_rate
+    progress = (step - warmup_steps) / max(total_steps - warmup_steps, 1)
+    cosine = 0.5 * (1.0 + math.cos(math.pi * 2.0 * args.lr_num_cycles * progress))
+    return args.min_learning_rate + (
+        args.learning_rate - args.min_learning_rate
+    ) * cosine
+
+
+def _set_optimizer_learning_rate(
+    optimizer: torch.optim.Optimizer,
+    learning_rate: float,
+) -> None:
+    for param_group in optimizer.param_groups:
+        param_group["lr"] = learning_rate
 
 
 def _copy_if_exists(src: Path, dst: Path) -> None:
@@ -1129,6 +1175,7 @@ def _run_periodic_eval(
             model_path=str(model_dir),
             num_envs=args.eval_num_envs,
             eval_rollout_epochs=args.eval_rollout_epochs,
+            eval_step_limit=args.eval_step_limit,
             max_chunk_steps=args.eval_max_chunk_steps,
             action_exec_horizon=args.eval_action_exec_horizon,
             visualize=args.eval_visualize,
@@ -1139,6 +1186,7 @@ def _run_periodic_eval(
             eval_seeds_path=args.eval_seeds_path,
             debug_log_chunks=args.eval_debug_log_chunks,
             debug_action_steps=args.eval_debug_action_steps,
+            record_progress=args.eval_record_progress,
         )
     except Exception:
         print(
@@ -1151,6 +1199,8 @@ def _run_periodic_eval(
     eval_json_path = output_root / "evals" / f"step_{step:07d}.json"
     save_eval_result(result, eval_json_path)
     metrics = result["metrics"]
+    progress_aggregate = result.get("progress", {}).get("aggregate", {})
+    stage_counts = progress_aggregate.get("stage_counts", {})
     print(
         "[train_robotwin_vla] "
         f"eval step={step} "
@@ -1158,21 +1208,44 @@ def _run_periodic_eval(
         f"success_once={metrics.get('success_once', 0.0)} "
         f"return={metrics.get('return', 0.0)} "
         f"episode_len={metrics.get('episode_len', 0.0)} "
+        f"mean_min_tcp_phone_l2={progress_aggregate.get('mean_min_tcp_phone_l2', 'n/a')} "
+        f"mean_max_phone_displacement={progress_aggregate.get('mean_max_phone_displacement', 'n/a')} "
+        f"stage_counts={json.dumps(stage_counts, ensure_ascii=False)} "
         f"runtime_seconds={eval_runtime:.2f}"
     )
     if wandb_logger is not None:
-        wandb_logger.log(
-            {
-                "eval/success_at_end": float(metrics.get("success_at_end", 0.0)),
-                "eval/success_once": float(metrics.get("success_once", 0.0)),
-                "eval/return": float(metrics.get("return", 0.0)),
-                "eval/reward": float(metrics.get("reward", 0.0)),
-                "eval/episode_len": float(metrics.get("episode_len", 0.0)),
-                "eval/num_trajectories": float(metrics.get("num_trajectories", 0.0)),
-                "eval/runtime_seconds": float(eval_runtime),
-            },
-            step=step,
-        )
+        eval_log_payload: dict[str, float] = {
+            "eval/success_at_end": float(metrics.get("success_at_end", 0.0)),
+            "eval/success_once": float(metrics.get("success_once", 0.0)),
+            "eval/return": float(metrics.get("return", 0.0)),
+            "eval/reward": float(metrics.get("reward", 0.0)),
+            "eval/episode_len": float(metrics.get("episode_len", 0.0)),
+            "eval/num_trajectories": float(metrics.get("num_trajectories", 0.0)),
+            "eval/runtime_seconds": float(eval_runtime),
+        }
+        for key in (
+            "mean_initial_l2_distance",
+            "mean_min_l2_distance",
+            "mean_final_l2_distance",
+            "mean_initial_tcp_phone_l2",
+            "mean_min_tcp_phone_l2",
+            "mean_final_tcp_phone_l2",
+            "mean_max_phone_displacement",
+            "mean_max_phone_height_gain",
+        ):
+            if key in progress_aggregate:
+                eval_log_payload[f"eval_progress/{key}"] = float(progress_aggregate[key])
+        for stage_name in (
+            "success",
+            "moved_phone",
+            "approached_phone",
+            "weak_approach",
+            "no_meaningful_approach",
+        ):
+            eval_log_payload[f"eval_progress/stage_count/{stage_name}"] = float(
+                stage_counts.get(stage_name, 0)
+            )
+        wandb_logger.log(eval_log_payload, step=step)
     if dist_ctx.is_distributed:
         dist.barrier()
     return result
@@ -1256,6 +1329,11 @@ def run(args: Args) -> None:
         betas=(0.9, 0.95),
         eps=1.0e-8,
     )
+    optimizer_updates = 0
+    _set_optimizer_learning_rate(
+        optimizer,
+        _learning_rate_for_update(args, update_step=1),
+    )
 
     amp_enabled = device.type == "cuda"
     loader_iter = iter(data_loader)
@@ -1324,11 +1402,17 @@ def run(args: Args) -> None:
                     enabled=args.debug_stage_logs,
                     all_ranks=args.debug_all_ranks,
                 )
+                current_update = optimizer_updates + 1
+                _set_optimizer_learning_rate(
+                    optimizer,
+                    _learning_rate_for_update(args, update_step=current_update),
+                )
                 grad_norm = torch.nn.utils.clip_grad_norm_(
                     model.parameters(),
                     args.clip_grad_norm,
                 )
                 optimizer.step()
+                optimizer_updates = current_update
                 optimizer.zero_grad(set_to_none=True)
                 _log_stage(
                     f"step {step}: optimizer step done",
@@ -1475,9 +1559,14 @@ def main(
     eval_config_name: str = "robotwin_place_phone_stand_ppo_openpi_pi05",
     batch_size: int = 8,
     grad_accum_steps: int = 1,
-    train_steps: int = 2000,
-    learning_rate: float = 5.0e-6,
-    weight_decay: float = 1.0e-2,
+    train_steps: int = 20000,
+    learning_rate: float = 2.5e-5,
+    min_learning_rate: float = 2.5e-6,
+    lr_warmup_steps: int = 1000,
+    lr_total_steps: int = 30000,
+    lr_num_cycles: float = 0.5,
+    lr_scheduler: Literal["none", "cosine"] = "cosine",
+    weight_decay: float = 1.0e-10,
     clip_grad_norm: float = 1.0,
     log_every: int = 20,
     save_every: int = 200,
@@ -1490,13 +1579,15 @@ def main(
     eval_num_envs: int = 1,
     eval_rollout_epochs: int = 1,
     eval_seeds_path: str | None = None,
+    eval_step_limit: int | None = None,
     eval_max_chunk_steps: int | None = None,
     eval_action_exec_horizon: int | None = None,
+    eval_record_progress: bool = True,
     eval_visualize: bool = False,
     eval_render_freq: int = 10,
     eval_sleep_between_chunks: float = 0.0,
     eval_hold_viewer_seconds: float = 0.0,
-    eval_device: Literal["cpu", "cuda", "auto"] = "cpu",
+    eval_device: str = "cpu",
     eval_debug_log_chunks: bool = False,
     eval_debug_action_steps: int = 0,
     action_probe_every: int = 100,
@@ -1516,6 +1607,7 @@ def main(
     save_optimizer_state: bool = False,
     debug_stage_logs: bool = True,
     debug_all_ranks: bool = False,
+    noise_level: float = 0.5,
 ) -> None:
     run(
         Args(
@@ -1532,6 +1624,11 @@ def main(
             grad_accum_steps=grad_accum_steps,
             train_steps=train_steps,
             learning_rate=learning_rate,
+            min_learning_rate=min_learning_rate,
+            lr_warmup_steps=lr_warmup_steps,
+            lr_total_steps=lr_total_steps,
+            lr_num_cycles=lr_num_cycles,
+            lr_scheduler=lr_scheduler,
             weight_decay=weight_decay,
             clip_grad_norm=clip_grad_norm,
             log_every=log_every,
@@ -1545,8 +1642,10 @@ def main(
             eval_num_envs=eval_num_envs,
             eval_rollout_epochs=eval_rollout_epochs,
             eval_seeds_path=eval_seeds_path,
+            eval_step_limit=eval_step_limit,
             eval_max_chunk_steps=eval_max_chunk_steps,
             eval_action_exec_horizon=eval_action_exec_horizon,
+            eval_record_progress=eval_record_progress,
             eval_visualize=eval_visualize,
             eval_render_freq=eval_render_freq,
             eval_sleep_between_chunks=eval_sleep_between_chunks,
@@ -1571,6 +1670,7 @@ def main(
             save_optimizer_state=save_optimizer_state,
             debug_stage_logs=debug_stage_logs,
             debug_all_ranks=debug_all_ranks,
+            noise_level=noise_level,
         )
     )
 
