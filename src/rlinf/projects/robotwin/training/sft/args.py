@@ -4,6 +4,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
+from rlinf.training.common.distributed import DistributedContext
+
 
 @dataclass(frozen=True)
 class Args:
@@ -74,22 +76,6 @@ class Args:
     debug_stage_logs: bool = True
     debug_all_ranks: bool = False
     noise_level: float = 0.5
-
-
-@dataclass(frozen=True)
-class DistributedContext:
-    backend: Literal["none", "fsdp"]
-    rank: int = 0
-    world_size: int = 1
-    local_rank: int = 0
-
-    @property
-    def is_distributed(self) -> bool:
-        return self.backend != "none"
-
-    @property
-    def is_main(self) -> bool:
-        return self.rank == 0
 
 
 __all__ = ["Args", "DistributedContext"]

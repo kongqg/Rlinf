@@ -14,17 +14,20 @@ src/
     models/                     # embodied model wrapper，包括 OpenPI/pi0.5
     projects/
       robotwin/
+        adapters/               # RoboTwin task adapter
         cli/                    # 可 import 的命令行入口
         configs/                # RoboTwin 实验 Hydra 配置
+        data/                   # RoboTwin dataset adapter
         integration/            # project config 到 RLinf runner 的桥接层
         robotwin/               # dataset、eval、norm stats、probe
         runtime/                # path、env var、logging、seed、device 工具
         training/
-          sft/                  # VLA SFT 训练代码
-          local_rl/             # 本地 RL fine-tune 代码
+          sft/                  # 兼容旧 import 的 SFT wrapper
+          local_rl/             # 兼容旧 import 的 local RL wrapper
         utils/                  # 兼容旧 eval API 的项目工具
     runners/                    # RLinf runner
     scheduler/                  # cluster、placement、worker scheduling
+    training/                   # 通用 training 入口、协议和 common helper
     utils/                      # RLinf 通用工具
     workers/                    # actor/env/rollout/reward worker
 
@@ -42,14 +45,14 @@ model/                          # 本地实验产物，不是源码主路径
 ## RoboTwin 项目模块
 
 - `cli/`：薄入口，只负责解析 CLI，然后调用训练或评测逻辑。
+- `adapters/`：RoboTwin task adapter，负责把 dataset、model、env、eval 接到通用 training 入口。
+- `data/`：本地 RoboTwin V3 数据集 adapter。
 - `configs/embodiment/`：RoboTwin `place_phone_stand` 的 Hydra 配置。
 - `integration/rlinf_embodied.py`：校验 Hydra config，并启动 RLinf embodied runner。
-- `robotwin/dataset.py`：本地 RoboTwin V3 数据集 adapter。
 - `robotwin/eval.py` 和 `utils/robotwin_eval.py`：policy eval 逻辑和旧 API 兼容层。
 - `robotwin/norm_stats.py`：state/action normalization stats 计算。
-- `robotwin/probes.py`：固定样本的 rollout-style action probe。
-- `training/sft/`：VLA supervised fine-tuning，包括 args、data、model、FSDP、optim、checkpoint、eval、trainer。
-- `training/local_rl/`：本地 RL fine-tuning，包括 rollout、batch、optim、metrics、checkpoint、eval、runner。
+- `training/sft/`：兼容旧 import 的 SFT wrapper。
+- `training/local_rl/`：兼容旧 import 的 local RL wrapper。
 - `runtime/`：项目共享的路径、环境变量、随机种子、device、logging 工具。
 
 ## 安装
