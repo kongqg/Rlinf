@@ -88,6 +88,19 @@ def load_eval_cfg(
     ):
         cfg = hydra.compose(config_name=config_name, overrides=overrides)
     OmegaConf.resolve(cfg)
+    metadata = _load_sft_metadata(model_path)
+    if metadata.get("is_lora", False):
+        with open_dict(cfg.actor.model):
+            cfg.actor.model.is_lora = True
+            cfg.actor.model.lora_rank = int(
+                metadata.get(
+                    "lora_rank",
+                    getattr(cfg.actor.model, "lora_rank", 32),
+                )
+            )
+            # RLinf SFT checkpoints store the LoRA module weights inside
+            # model_state_dict/full_weights.pt, not as a PEFT adapter directory.
+            cfg.actor.model.lora_path = None
     if eval_seeds_path is not None:
         with open_dict(cfg.env.eval):
             cfg.env.eval.seeds_path = str(Path(eval_seeds_path).expanduser().resolve())
@@ -106,6 +119,18 @@ def load_eval_cfg(
         cfg.env.eval.task_config.render_freq = render_freq
         cfg.env.eval.task_config.eval_video_log = False
     return cfg
+
+
+def _load_sft_metadata(model_path: str | None) -> dict[str, Any]:
+    if model_path is None:
+        return {}
+    metadata_path = Path(model_path).expanduser().resolve() / "sft_metadata.json"
+    if not metadata_path.exists():
+        return {}
+    try:
+        return json.loads(metadata_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid SFT metadata JSON: {metadata_path}") from exc
 
 
 def json_ready(value: Any) -> Any:
@@ -635,6 +660,8 @@ def run_robotwin_policy_eval(
             "chunk_steps_per_epoch": n_eval_chunk_steps,
             "action_exec_horizon": actual_action_exec_horizon,
             "num_action_chunks": cfg.actor.model.num_action_chunks,
+            "is_lora": bool(getattr(cfg.actor.model, "is_lora", False)),
+            "lora_rank": int(getattr(cfg.actor.model, "lora_rank", 0) or 0),
             "device": str(device),
             "visualize": visualize,
             "render_freq": env_cfg.task_config.render_freq,

@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from pathlib import Path
+from typing import Any
 
 from bentele.utils.robotwin_eval import run_robotwin_policy_eval, save_eval_result
 
@@ -167,11 +169,127 @@ def parse_args() -> argparse.Namespace:
         default=2.0,
         help="FPS used when writing rollout videos.",
     )
+    parser.add_argument(
+        "--step",
+        type=int,
+        default=None,
+        help=(
+            "Training step to use for W&B logging. If omitted, the script tries "
+            "to read sft_metadata.json or training_state.pt from model-path."
+        ),
+    )
+    parser.add_argument("--wandb-enabled", action="store_true")
+    parser.add_argument("--wandb-project", default="bentele")
+    parser.add_argument("--wandb-run-name", default=None)
+    parser.add_argument("--wandb-group", default=None)
+    parser.add_argument("--wandb-log-dir", default=None)
+    parser.add_argument("--wandb-proxy", default=None)
+    parser.add_argument(
+        "--wandb-mode",
+        choices=("online", "offline", "disabled"),
+        default="online",
+    )
+    parser.add_argument("--wandb-tags", nargs="*", default=[])
     return parser.parse_args()
+
+
+def _infer_step(model_path: str) -> int:
+    model_dir = Path(model_path).expanduser().resolve()
+    metadata_path = model_dir / "sft_metadata.json"
+    if metadata_path.exists():
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        if "saved_step" in metadata:
+            return int(metadata["saved_step"])
+
+    state_path = model_dir / "training_state.pt"
+    if state_path.exists():
+        import torch
+
+        state = torch.load(state_path, map_location="cpu")
+        if "step" in state:
+            return int(state["step"])
+    return 0
+
+
+def _wandb_payload(result: dict[str, Any], runtime_seconds: float) -> dict[str, float]:
+    metrics = result.get("metrics", {})
+    progress_aggregate = result.get("progress", {}).get("aggregate", {})
+    stage_counts = progress_aggregate.get("stage_counts", {})
+    payload: dict[str, float] = {
+        "eval/success_at_end": float(metrics.get("success_at_end", 0.0)),
+        "eval/success_once": float(metrics.get("success_once", 0.0)),
+        "eval/return": float(metrics.get("return", 0.0)),
+        "eval/reward": float(metrics.get("reward", 0.0)),
+        "eval/episode_len": float(metrics.get("episode_len", 0.0)),
+        "eval/num_trajectories": float(metrics.get("num_trajectories", 0.0)),
+        "eval/runtime_seconds": float(runtime_seconds),
+    }
+    for key in (
+        "mean_initial_l2_distance",
+        "mean_min_l2_distance",
+        "mean_final_l2_distance",
+        "mean_initial_tcp_phone_l2",
+        "mean_min_tcp_phone_l2",
+        "mean_final_tcp_phone_l2",
+        "mean_max_phone_displacement",
+        "mean_max_phone_height_gain",
+    ):
+        if key in progress_aggregate:
+            payload[f"eval_progress/{key}"] = float(progress_aggregate[key])
+    for stage_name in (
+        "success",
+        "moved_phone",
+        "approached_phone",
+        "weak_approach",
+        "no_meaningful_approach",
+    ):
+        payload[f"eval_progress/stage_count/{stage_name}"] = float(
+            stage_counts.get(stage_name, 0)
+        )
+    return payload
+
+
+def _log_wandb(args: argparse.Namespace, result: dict[str, Any], runtime_seconds: float) -> None:
+    if not args.wandb_enabled or args.wandb_mode == "disabled":
+        return
+    try:
+        import wandb
+    except ImportError as exc:
+        raise RuntimeError(
+            "wandb is not installed in the current environment. "
+            "Install it first or omit --wandb-enabled."
+        ) from exc
+
+    settings = None
+    if args.wandb_proxy:
+        settings = wandb.Settings(https_proxy=args.wandb_proxy)
+
+    output_path = Path(args.output_json).expanduser().resolve()
+    wandb_log_dir = (
+        Path(args.wandb_log_dir).expanduser().resolve()
+        if args.wandb_log_dir is not None
+        else output_path.parent / "wandb_eval"
+    )
+    wandb_log_dir.mkdir(parents=True, exist_ok=True)
+    step = args.step if args.step is not None else _infer_step(args.model_path)
+    run = wandb.init(
+        project=args.wandb_project,
+        name=args.wandb_run_name or f"{Path(args.model_path).name}-eval",
+        group=args.wandb_group,
+        config=vars(args),
+        settings=settings,
+        dir=str(wandb_log_dir),
+        tags=list(args.wandb_tags),
+        mode=args.wandb_mode,
+        reinit=True,
+    )
+    run.log(_wandb_payload(result, runtime_seconds), step=step)
+    run.finish()
 
 
 def main() -> None:
     args = parse_args()
+    eval_start = time.time()
     result = run_robotwin_policy_eval(
         config_name=args.config_name,
         assets_path=args.assets_path,
@@ -194,7 +312,12 @@ def main() -> None:
         save_video_dir=args.save_video_dir,
         video_fps=args.video_fps,
     )
+    runtime_seconds = time.time() - eval_start
+    step = args.step if args.step is not None else _infer_step(args.model_path)
+    result["step"] = step
+    result["runtime_seconds"] = runtime_seconds
     save_eval_result(result, args.output_json)
+    _log_wandb(args, result, runtime_seconds)
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 

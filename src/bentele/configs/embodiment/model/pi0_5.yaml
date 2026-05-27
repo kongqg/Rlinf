@@ -1,0 +1,38 @@
+model_type: "openpi"
+
+model_path: "/path/to/model/pi05_robotwin_phone"
+precision: null
+
+num_action_chunks: 50
+action_dim: 14
+
+is_lora: False
+lora_rank: 32
+lora_path: null
+
+use_proprio: True
+num_steps: 5
+add_value_head: False
+
+openpi:
+  config_name: "pi05_aloha_robotwin"
+  num_images_in_input: 3
+  noise_level: 0.3
+  action_chunk: ${actor.model.num_action_chunks}
+  num_steps: ${actor.model.num_steps}
+  train_expert_only: False
+  action_env_dim: ${actor.model.action_dim}
+  noise_method: "flow_sde"
+  add_value_head: ${actor.model.add_value_head}
+  value_after_vlm: False
+  value_vlm_mode: "mean_token"
+  detach_critic_input: null
+
+  use_dsrl: False
+  dsrl_state_dim: 8
+  dsrl_action_noise_dim: 32
+  dsrl_num_q_heads: 10
+  dsrl_agg_q: "mean"
+  dsrl_image_latent_dim: 64
+  dsrl_state_latent_dim: 64
+  dsrl_hidden_dims: [128, 128, 128]

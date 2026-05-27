@@ -12,6 +12,7 @@ This script keeps the training path intentionally small:
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import timedelta
 import json
 import math
 import os
@@ -89,10 +90,14 @@ class Args:
     clip_grad_norm: float = 1.0
     log_every: int = 20
     save_every: int = 200
+    save_step_checkpoints: bool = False
     num_workers: int = 0
     seed: int = 1234
     device: str = "cuda"
     use_quantile_norm: bool = False
+    is_lora: bool = False
+    lora_rank: int = 32
+    lora_path: str | None = None
     assets_path: str | None = None
     eval_every: int = 0
     eval_num_envs: int = 1
@@ -114,15 +119,18 @@ class Args:
     wandb_enabled: bool = False
     wandb_project: str = "bentele"
     wandb_run_name: str | None = None
+    wandb_group: str | None = None
     wandb_log_dir: str | None = None
     wandb_proxy: str | None = None
     wandb_mode: Literal["online", "offline", "disabled"] = "online"
     wandb_tags: tuple[str, ...] = ()
     distributed_backend: Literal["none", "fsdp"] = "none"
+    dist_timeout_minutes: int = 60
     fsdp_sharding_strategy: Literal["full_shard", "shard_grad_op"] = "full_shard"
     fsdp_mixed_precision: Literal["bf16", "fp32"] = "bf16"
     fsdp_cpu_offload: bool = False
     fsdp_use_orig_params: bool = True
+    fsdp_lora_auto_wrap: bool = False
     save_optimizer_state: bool = False
     debug_stage_logs: bool = True
     debug_all_ranks: bool = False
@@ -215,10 +223,18 @@ def _init_distributed(args: Args) -> DistributedContext:
             "distributed_backend=fsdp requires torchrun. "
             "Example: torchrun --standalone --nproc_per_node=8 scripts/train_robotwin_vla.py ..."
         )
+    if args.dist_timeout_minutes <= 0:
+        raise ValueError(
+            "dist_timeout_minutes must be positive, "
+            f"but got {args.dist_timeout_minutes}."
+        )
 
     if not dist.is_initialized():
         torch.cuda.set_device(local_rank)
-        dist.init_process_group(backend="nccl")
+        dist.init_process_group(
+            backend="nccl",
+            timeout=timedelta(minutes=args.dist_timeout_minutes),
+        )
 
     return DistributedContext(
         backend="fsdp",
@@ -265,6 +281,7 @@ def _init_wandb_logger(
         config=asdict(args),
         settings=settings,
         dir=str(wandb_log_dir),
+        group=args.wandb_group,
         tags=list(args.wandb_tags),
         mode=args.wandb_mode,
         reinit=True,
@@ -687,6 +704,8 @@ def _build_fsdp_model(
     device: torch.device,
     dist_ctx: DistributedContext,
 ) -> FSDP:
+    if device.type == "cuda":
+        torch.cuda.set_device(device)
     _log_stage(
         "fsdp wrap start",
         dist_ctx,
@@ -697,7 +716,7 @@ def _build_fsdp_model(
     # bfloat16 and others in float32. Classic FSDP cannot flatten mixed-dtype
     # parameters inside one wrapped module, so normalize everything back to
     # float32 before wrapping. Runtime compute still uses autocast bf16.
-    model.to(dtype=torch.float32)
+    model.to(device=device, dtype=torch.float32)
 
     sharding_strategy = {
         "full_shard": ShardingStrategy.FULL_SHARD,
@@ -713,8 +732,19 @@ def _build_fsdp_model(
         )
 
     cpu_offload = CPUOffload(offload_params=args.fsdp_cpu_offload)
+    auto_wrap_policy = None
+    if args.is_lora and args.fsdp_lora_auto_wrap:
+        from rlinf.hybrid_engines.fsdp.utils import get_fsdp_wrap_policy
+
+        auto_wrap_policy = get_fsdp_wrap_policy(
+            module=model,
+            config={},
+            is_lora=True,
+            model_type="openpi",
+        )
     model = FSDP(
         model,
+        auto_wrap_policy=auto_wrap_policy,
         device_id=device,
         sharding_strategy=sharding_strategy,
         mixed_precision=mixed_precision,
@@ -739,6 +769,13 @@ def _build_runtime_cfg(args: Args):
     return OmegaConf.create(
         {
             "model_path": str(Path(args.model_path).expanduser().resolve()),
+            "is_lora": args.is_lora,
+            "lora_rank": args.lora_rank,
+            "lora_path": (
+                str(Path(args.lora_path).expanduser().resolve())
+                if args.lora_path is not None
+                else None
+            ),
             "openpi": {
                 "config_name": args.config_name,
                 "num_images_in_input": 3,
@@ -786,6 +823,97 @@ def _load_openpi_weights(model: torch.nn.Module, checkpoint_dir: str) -> None:
         state_dict = safetensors.torch.load_file(weight_path, device="cpu")
         all_state_dict.update(state_dict)
     model.load_state_dict(all_state_dict, strict=False)
+
+
+def _tag_vlm_subtree(model: torch.nn.Module, is_vlm: bool) -> None:
+    for _, module in model.named_modules():
+        setattr(module, "_to_lora", is_vlm)
+
+
+def _apply_openpi_lora(
+    model: torch.nn.Module,
+    *,
+    lora_rank: int,
+    lora_path: str | None,
+) -> torch.nn.Module:
+    """Apply the RLinf/OpenPI LoRA layout to the PaliGemma VLM subtree."""
+    if getattr(model, "_rlinf_lora_applied", False):
+        return model
+    if lora_rank <= 0:
+        raise ValueError(f"lora_rank must be positive, got {lora_rank}.")
+    if not hasattr(model, "paligemma_with_expert") or not hasattr(
+        model.paligemma_with_expert,
+        "paligemma",
+    ):
+        raise AttributeError(
+            "OpenPI LoRA expects model.paligemma_with_expert.paligemma to exist."
+        )
+
+    from peft import LoraConfig, PeftModel, get_peft_model
+
+    target_modules = [
+        "proj",
+        "qkv",
+        "fc1",
+        "fc2",
+        "q",
+        "kv",
+        "fc3",
+        "out_proj",
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "o_proj",
+        "gate_proj",
+        "up_proj",
+        "down_proj",
+        "lm_head",
+    ]
+
+    _tag_vlm_subtree(model, False)
+    module_to_lora = model.paligemma_with_expert.paligemma
+    if lora_path is None:
+        lora_config = LoraConfig(
+            r=lora_rank,
+            lora_alpha=lora_rank,
+            lora_dropout=0.0,
+            target_modules=target_modules,
+            init_lora_weights="gaussian",
+        )
+        module_to_lora = get_peft_model(module_to_lora, lora_config)
+    else:
+        module_to_lora = PeftModel.from_pretrained(
+            module_to_lora,
+            lora_path,
+            is_trainable=True,
+        )
+    _tag_vlm_subtree(module_to_lora, True)
+    model.paligemma_with_expert.paligemma = module_to_lora
+    setattr(model, "_rlinf_lora_applied", True)
+    return model
+
+
+def _count_parameters(model: torch.nn.Module) -> dict[str, float | int]:
+    total = 0
+    trainable = 0
+    lora = 0
+    trainable_lora = 0
+    for name, param in model.named_parameters():
+        n_params = param.numel()
+        total += n_params
+        if param.requires_grad:
+            trainable += n_params
+        if "lora_" in name.lower():
+            lora += n_params
+            if param.requires_grad:
+                trainable_lora += n_params
+    return {
+        "total": total,
+        "trainable": trainable,
+        "lora": lora,
+        "trainable_lora": trainable_lora,
+        "trainable_ratio": (trainable / total) if total else 0.0,
+    }
 
 
 def _build_openpi_model_for_fsdp(
@@ -841,6 +969,24 @@ def _build_openpi_model_for_fsdp(
             dist_ctx,
             enabled=args.debug_stage_logs,
             all_ranks=False,
+        )
+
+    if args.is_lora and not getattr(model, "_rlinf_lora_applied", False):
+        resolved_lora_path = (
+            str(Path(args.lora_path).expanduser().resolve())
+            if args.lora_path is not None
+            else None
+        )
+        _log_stage(
+            f"applying LoRA after base checkpoint load rank={args.lora_rank} lora_path={resolved_lora_path}",
+            dist_ctx,
+            enabled=args.debug_stage_logs,
+            all_ranks=args.debug_all_ranks,
+        )
+        model = _apply_openpi_lora(
+            model,
+            lora_rank=args.lora_rank,
+            lora_path=resolved_lora_path,
         )
 
     if data_config.asset_id is None:
@@ -1017,6 +1163,13 @@ def _write_model_dir(
         "train_num_episodes_limit": args.train_num_episodes_limit,
         "train_sample_limit": args.train_sample_limit,
         "use_quantile_norm": args.use_quantile_norm,
+        "is_lora": args.is_lora,
+        "lora_rank": args.lora_rank,
+        "lora_path": (
+            str(Path(args.lora_path).expanduser().resolve())
+            if args.lora_path is not None
+            else None
+        ),
         "saved_step": step,
     }
     (output_dir / "sft_metadata.json").write_text(
@@ -1089,6 +1242,15 @@ def _save_checkpoint(
         args=args,
         data_config=data_config,
     )
+    if dist_ctx.is_main and args.save_step_checkpoints:
+        _write_model_dir(
+            output_dir=output_dir / "checkpoints" / f"step_{step:07d}",
+            model_state=model_state,
+            optimizer_state=optimizer_state,
+            step=step,
+            args=args,
+            data_config=data_config,
+        )
     if dist_ctx.is_distributed:
         dist.barrier()
 
@@ -1322,6 +1484,20 @@ def run(args: Args) -> None:
         enabled=args.debug_stage_logs,
         all_ranks=args.debug_all_ranks,
     )
+    if dist_ctx.is_main:
+        param_counts = _count_parameters(model)
+        print(
+            "[train_robotwin_vla] "
+            f"is_lora={args.is_lora} "
+            f"lora_rank={args.lora_rank} "
+            f"lora_path={args.lora_path} "
+            f"total_params={param_counts['total']} "
+            f"trainable_params={param_counts['trainable']} "
+            f"lora_params={param_counts['lora']} "
+            f"trainable_lora_params={param_counts['trainable_lora']} "
+            f"trainable_ratio={param_counts['trainable_ratio']:.6f}",
+            flush=True,
+        )
     optimizer = torch.optim.AdamW(
         [p for p in model.parameters() if p.requires_grad],
         lr=args.learning_rate,
@@ -1570,10 +1746,14 @@ def main(
     clip_grad_norm: float = 1.0,
     log_every: int = 20,
     save_every: int = 200,
+    save_step_checkpoints: bool = False,
     num_workers: int = 0,
     seed: int = 1234,
     device: str = "cuda",
     use_quantile_norm: bool = False,
+    is_lora: bool = False,
+    lora_rank: int = 32,
+    lora_path: str | None = None,
     assets_path: str | None = None,
     eval_every: int = 0,
     eval_num_envs: int = 1,
@@ -1595,11 +1775,13 @@ def main(
     wandb_enabled: bool = False,
     wandb_project: str = "bentele",
     wandb_run_name: str | None = None,
+    wandb_group: str | None = None,
     wandb_log_dir: str | None = None,
     wandb_proxy: str | None = None,
     wandb_mode: Literal["online", "offline", "disabled"] = "online",
     wandb_tags: tuple[str, ...] = (),
     distributed_backend: Literal["none", "fsdp"] = "none",
+    dist_timeout_minutes: int = 60,
     fsdp_sharding_strategy: Literal["full_shard", "shard_grad_op"] = "full_shard",
     fsdp_mixed_precision: Literal["bf16", "fp32"] = "bf16",
     fsdp_cpu_offload: bool = False,
@@ -1633,10 +1815,14 @@ def main(
             clip_grad_norm=clip_grad_norm,
             log_every=log_every,
             save_every=save_every,
+            save_step_checkpoints=save_step_checkpoints,
             num_workers=num_workers,
             seed=seed,
             device=device,
             use_quantile_norm=use_quantile_norm,
+            is_lora=is_lora,
+            lora_rank=lora_rank,
+            lora_path=lora_path,
             assets_path=assets_path,
             eval_every=eval_every,
             eval_num_envs=eval_num_envs,
@@ -1658,11 +1844,13 @@ def main(
             wandb_enabled=wandb_enabled,
             wandb_project=wandb_project,
             wandb_run_name=wandb_run_name,
+            wandb_group=wandb_group,
             wandb_log_dir=wandb_log_dir,
             wandb_proxy=wandb_proxy,
             wandb_mode=wandb_mode,
             wandb_tags=wandb_tags,
             distributed_backend=distributed_backend,
+            dist_timeout_minutes=dist_timeout_minutes,
             fsdp_sharding_strategy=fsdp_sharding_strategy,
             fsdp_mixed_precision=fsdp_mixed_precision,
             fsdp_cpu_offload=fsdp_cpu_offload,
