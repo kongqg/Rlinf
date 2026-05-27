@@ -273,8 +273,6 @@ my_rllnf
 - 任务：`RoboTwin place_phone_stand`
 - 配置：`robotwin_place_phone_stand_ppo_openpi_pi05`
 - 模型：`pi0.5/openpi`
-- 追踪脚本：
-  [trace_robotwin_pipeline.py](/home/kqg/bentele/scripts/trace_robotwin_pipeline.py:1)
 - 本地日志：
   [robotwin_place_phone_stand_pipeline.log](/home/kqg/Downloads/robotwin_place_phone_stand_pipeline.log:1)
 
@@ -302,10 +300,6 @@ my_rllnf
 - `sampling.do_sample = true`
 - `temperature_train = 1.0`
 - `temperature_eval = 0.6`
-
-对应 trace 里的代码位置：
-
-- [trace_robotwin_pipeline.py:153](/home/kqg/bentele/scripts/trace_robotwin_pipeline.py:153)
 
 ### 2. 环境初始化
 
@@ -2154,5 +2148,4 @@ output_dict = self.model(
   actor 端整理好的 `[T, B, ...]` 训练 batch
 - `forward_inputs`
   actor 重新前向、复算 logprob/value 的核心上下文
-
 

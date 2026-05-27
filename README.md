@@ -39,25 +39,6 @@ skills/                         # 本地 Codex skill
 model/                          # 本地实验产物，不是源码主路径
 ```
 
-## 项目路径
-
-本地默认项目路径：
-
-```bash
-cd /home/kqg/bentele
-export PYTHONPATH=$PWD/src
-```
-
-## 主要入口
-
-```bash
-PYTHONPATH=src python -m rlinf.projects.robotwin.cli.train_robotwin_vla --help
-PYTHONPATH=src python -m rlinf.projects.robotwin.cli.train_robotwin_local_rl --help
-PYTHONPATH=src python -m rlinf.projects.robotwin.cli.eval_robotwin_policy --help
-PYTHONPATH=src python -m rlinf.projects.robotwin.cli.compute_robotwin_norm_stats --help
-PYTHONPATH=src python -m rlinf.projects.robotwin.cli.train_embodied --help
-```
-
 ## RoboTwin 项目模块
 
 - `cli/`：薄入口，只负责解析 CLI，然后调用训练或评测逻辑。
@@ -95,7 +76,7 @@ pip install -r requirements-maniskill.txt
 先按本地实际路径设置这些变量：
 
 ```bash
-cd /home/kqg/bentele
+cd /Path/to/Project
 export PYTHONPATH=$PWD/src
 
 export ROBOTWIN_ASSETS=/path/to/RoboTwin
@@ -104,7 +85,7 @@ export BASE_PI05=/path/to/pi05_base_torch
 export OUTPUT_ROOT=/data/120T/kqg/bentele/model
 ```
 
-### 1. 计算 norm stats
+### 1. 计算 norm stats（pi0.5要用）
 
 ```bash
 python scripts/compute_robotwin_norm_stats.py \
@@ -169,23 +150,6 @@ CUDA_VISIBLE_DEVICES=0 python scripts/train_robotwin_vla_lora.py \
   --wandb-enabled
 ```
 
-如果要从已有 LoRA adapter 继续训：
-
-```bash
-python scripts/train_robotwin_vla_lora.py \
-  --dataset-root "$DATASET_ROOT" \
-  --train-repo-ids place_phone_stand \
-  --model-path "$BASE_PI05" \
-  --lora-path /path/to/previous_lora_checkpoint \
-  --output-dir "$OUTPUT_ROOT/pi05_place_phone_stand_vla_lora_continue" \
-  --assets-path "$ROBOTWIN_ASSETS" \
-  --batch-size 64 \
-  --train-steps 10000 \
-  --save-every 500 \
-  --save-step-checkpoints \
-  --wandb-enabled
-```
-
 ### 4. 单独评估 checkpoint
 
 ```bash
@@ -234,27 +198,6 @@ CUDA_VISIBLE_DEVICES=0 python scripts/train_robotwin_local_rl.py \
   --wandb-enabled
 ```
 
-### 6. 排查 pipeline
-
-```bash
-python scripts/trace_robotwin_pipeline.py \
-  --assets-path "$ROBOTWIN_ASSETS" \
-  --model-path "$BASE_PI05"
-```
-
-### 7. 匹配 dataset episode 和 env seed
-
-```bash
-python scripts/match_robotwin_episode_seeds.py \
-  --dataset-root "$DATASET_ROOT" \
-  --repo-id place_phone_stand \
-  --robotwin-path "$ROBOTWIN_ASSETS" \
-  --task-config-path "$ROBOTWIN_ASSETS/task_config/_base_task_config.yaml" \
-  --episode-indices 0 1 2 3 4 \
-  --candidate-seeds-path "$PWD/src/rlinf/envs/robotwin/seeds/seed_status.json" \
-  --output-json traces/eval30_fixed_seeds.json
-```
-
 ## 快速查看参数
 
 VLA SFT：
@@ -285,18 +228,6 @@ python scripts/eval_robotwin_policy.py --help
 
 ```bash
 python scripts/compute_robotwin_norm_stats.py --help
-```
-
-排查 pipeline：
-
-```bash
-python scripts/trace_robotwin_pipeline.py --help
-```
-
-匹配 RoboTwin env reset seed 和 dataset episode：
-
-```bash
-python scripts/match_robotwin_episode_seeds.py --help
 ```
 
 预设 shell 脚本：
