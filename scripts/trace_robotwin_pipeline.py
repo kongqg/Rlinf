@@ -30,11 +30,13 @@ from rlinf.models.embodiment.openpi.openpi_action_model import (
 from rlinf.workers.rollout.hf.huggingface_worker import MultiStepRolloutWorker
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-CONFIG_DIR = REPO_ROOT / "src" / "bentele" / "configs" / "embodiment"
+CONFIG_DIR = REPO_ROOT / "src" / "rlinf" / "projects" / "robotwin" / "configs" / "embodiment"
 MAIN_CONFIG_FILE = (
     REPO_ROOT
     / "src"
-    / "bentele"
+    / "rlinf"
+    / "projects"
+    / "robotwin"
     / "configs"
     / "embodiment"
     / "robotwin_place_phone_stand_ppo_openpi_pi05.yaml"
@@ -42,7 +44,9 @@ MAIN_CONFIG_FILE = (
 ENV_CONFIG_FILE = (
     REPO_ROOT
     / "src"
-    / "bentele"
+    / "rlinf"
+    / "projects"
+    / "robotwin"
     / "configs"
     / "embodiment"
     / "env"

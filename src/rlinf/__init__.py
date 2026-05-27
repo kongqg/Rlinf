@@ -12,6 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .utils.omega_resolver import omegaconf_register
-
-omegaconf_register()
+try:
+    from .utils.omega_resolver import omegaconf_register
+except ModuleNotFoundError as exc:
+    if exc.name != "omegaconf":
+        raise
+else:
+    omegaconf_register()

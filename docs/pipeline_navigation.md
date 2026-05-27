@@ -22,11 +22,11 @@
 如果你只想先记住最重要的几个文件：
 
 - 训练入口：
-  `src/bentele/cli/train_embodied.py`
+  `src/rlinf/projects/robotwin/cli/train_embodied.py`
 - 配置入口：
-  `src/bentele/configs/embodiment/robotwin_place_phone_stand_ppo_openpi_pi05.yaml`
+  `src/rlinf/projects/robotwin/configs/embodiment/robotwin_place_phone_stand_ppo_openpi_pi05.yaml`
 - bridge：
-  `src/bentele/integration/rlinf_embodied.py`
+  `src/rlinf/projects/robotwin/integration/rlinf_embodied.py`
 - 主循环：
   `src/rlinf/runners/embodied_runner.py`
 - 环境：
@@ -46,9 +46,9 @@
 
 先看：
 
-- `src/bentele/configs/embodiment/robotwin_place_phone_stand_ppo_openpi_pi05.yaml`
-- `src/bentele/configs/embodiment/env/robotwin_place_phone_stand.yaml`
-- `src/bentele/configs/embodiment/model/pi0_5.yaml`
+- `src/rlinf/projects/robotwin/configs/embodiment/robotwin_place_phone_stand_ppo_openpi_pi05.yaml`
+- `src/rlinf/projects/robotwin/configs/embodiment/env/robotwin_place_phone_stand.yaml`
+- `src/rlinf/projects/robotwin/configs/embodiment/model/pi0_5.yaml`
 
 这里主要决定：
 
@@ -64,7 +64,7 @@
 
 看：
 
-- `src/bentele/cli/train_embodied.py`
+- `src/rlinf/projects/robotwin/cli/train_embodied.py`
   - `main(...)`
 
 它做的事很简单：
@@ -80,7 +80,7 @@
 
 看：
 
-- `src/bentele/integration/rlinf_embodied.py`
+- `src/rlinf/projects/robotwin/integration/rlinf_embodied.py`
   - `run_sync_embodied_training(...)`
   - `_create_sync_actor_group(...)`
 
@@ -433,8 +433,8 @@ PPO loss 细节再看：
 
 看：
 
-- `src/bentele/cli/train_embodied.py`
-- `src/bentele/integration/rlinf_embodied.py`
+- `src/rlinf/projects/robotwin/cli/train_embodied.py`
+- `src/rlinf/projects/robotwin/integration/rlinf_embodied.py`
 - `src/rlinf/runners/embodied_runner.py`
 
 ### 想看“环境 obs 是怎么出来的”
@@ -497,9 +497,9 @@ PPO loss 细节再看：
 
 如果你第一次读这条链，建议顺序就是：
 
-1. `src/bentele/configs/embodiment/robotwin_place_phone_stand_ppo_openpi_pi05.yaml`
-2. `src/bentele/cli/train_embodied.py`
-3. `src/bentele/integration/rlinf_embodied.py`
+1. `src/rlinf/projects/robotwin/configs/embodiment/robotwin_place_phone_stand_ppo_openpi_pi05.yaml`
+2. `src/rlinf/projects/robotwin/cli/train_embodied.py`
+3. `src/rlinf/projects/robotwin/integration/rlinf_embodied.py`
 4. `src/rlinf/runners/embodied_runner.py`
 5. `src/rlinf/workers/env/env_worker.py`
 6. `src/rlinf/workers/rollout/hf/huggingface_worker.py`

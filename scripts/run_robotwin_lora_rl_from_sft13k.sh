@@ -14,6 +14,6 @@ export USE_FLAX=0
 
 cd "${REPO_ROOT}"
 
-exec "${CONDA_PYTHON}" -m bentele.cli.train_embodied \
+exec "${CONDA_PYTHON}" -m rlinf.projects.robotwin.cli.train_embodied \
   --config-name robotwin_place_phone_stand_ppo_openpi_pi05_2gpu_lora_rl_from_sft13k \
   "$@"

@@ -20,7 +20,7 @@ subset centered on:
 - real-world environment hooks, primarily around Franka workflows
 - HuggingFace rollout and FSDP-based actor paths
 
-Local project-specific code should continue to live under `src/bentele/`.
+Local project-specific code should continue to live under `src/rlinf/projects/robotwin/`.
 
 ## OpenPI
 

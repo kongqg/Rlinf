@@ -8,7 +8,7 @@ my_rllnf
 
 
 
-- src/bentele/
+- src/rlinf/projects/robotwin/
   你的项目层。以后你自己的入口、配置、任务定义、三阶段逻辑、数据组织，优先都往这里放。
 
 - src/rlinf/
@@ -28,34 +28,34 @@ my_rllnf
   
   bentele 现在的包说明
 
-- bentele.cli
+- rlinf.projects.robotwin.cli
   主入口包。真正从这里启动训练。
 
-- bentele.integration
+- rlinf.projects.robotwin.integration
   桥接包。负责把 bentele 的入口接到 rlinf 的 runner/worker 上。
 
-- bentele.configs
+- rlinf.projects.robotwin.configs
   你自己的 Hydra 配置目录。以后 ManiSkill、realworld、三阶段任务配置都应该收这里。
 
-- bentele.algorithms
+- rlinf.projects.robotwin.algorithms
   旧的本地轻量算法 scaffold，目前不是主训练链。
 
-- bentele.data
+- rlinf.projects.robotwin.data
   旧的本地数据结构和 replay scaffold。
 
-- bentele.envs
+- rlinf.projects.robotwin.envs
   旧的本地 env scaffold，现在主要还是 mock 用。
 
-- bentele.models
+- rlinf.projects.robotwin.models
   旧的本地 policy/prompt scaffold，不是现在真实 pi0.5 + RLinf 主链。
 
-- bentele.runners
+- rlinf.projects.robotwin.runners
   旧的本地 runner scaffold。
 
-- bentele.scheduler
+- rlinf.projects.robotwin.scheduler
   旧的本地 cluster/placement scaffold。
 
-- bentele.workers
+- rlinf.projects.robotwin.workers
   
   
   
@@ -66,16 +66,16 @@ my_rllnf
   
   bentele 里关键文件现在怎么分工
 
-- src/bentele/__init__.py:1
+- src/rlinf/projects/robotwin/__init__.py:1
   说明 bentele 的定位：主包是 cli/configs/integration，旧 scaffold 还在但不再是主路径。
 
-- src/bentele/cli/train_embodied.py:1
+- src/rlinf/projects/robotwin/cli/train_embodied.py:1
   同步 embodied 训练入口，默认走 bentele 自己的 ManiSkill smoke config。
 
-- src/bentele/cli/train_embodied_async.py:1
+- src/rlinf/projects/robotwin/cli/train_embodied_async.py:1
   异步 embodied 训练入口。
 
-- src/bentele/integration/rlinf_embodied.py:1
+- src/rlinf/projects/robotwin/integration/rlinf_embodied.py:1
   这次最关键的桥接文件。负责：
   
   1. 调 rlinf.config.validate_cfg
@@ -83,42 +83,42 @@ my_rllnf
   3. 起 actor / rollout / env / reward group
   4. 选同步还是异步 runner
 
-- src/bentele/configs/embodiment/maniskill_ppo_openpi_pi05_smoke.yaml:1
+- src/rlinf/projects/robotwin/configs/embodiment/maniskill_ppo_openpi_pi05_smoke.yaml:1
   bentele 自己的同步 smoke config。
 
-- src/bentele/configs/embodiment/maniskill_async_ppo_openpi_pi05_smoke.yaml:1
+- src/rlinf/projects/robotwin/configs/embodiment/maniskill_async_ppo_openpi_pi05_smoke.yaml:1
   bentele 自己的异步 smoke config。
 
-- src/bentele/configs/embodiment/env/maniskill_put_on_plate_in_scene_25_main.yaml:1
+- src/rlinf/projects/robotwin/configs/embodiment/env/maniskill_put_on_plate_in_scene_25_main.yaml:1
   bentele 自己持有的 ManiSkill env config。
 
-- src/bentele/configs/embodiment/model/pi0_5.yaml:1
+- src/rlinf/projects/robotwin/configs/embodiment/model/pi0_5.yaml:1
   pi0.5/openpi 模型配置模板。
 
-- src/bentele/configs/embodiment/training_backend/fsdp.yaml:1
+- src/rlinf/projects/robotwin/configs/embodiment/training_backend/fsdp.yaml:1
   FSDP 后端配置模板。
   
   旧 scaffold 那部分文件，现在怎么看
 
-- bentele.data/schema.py
+- rlinf.projects.robotwin.data/schema.py
   轻量 Observation / Transition / SFTSample 定义。
 
-- bentele.data/replay_buffer.py
+- rlinf.projects.robotwin.data/replay_buffer.py
   轻量 replay buffer。
 
-- bentele.envs/mock_realworld.py
+- rlinf.projects.robotwin.envs/mock_realworld.py
   假真机 env。
 
-- bentele.models/pi05_policy.py
+- rlinf.projects.robotwin.models/pi05_policy.py
   假的 pi0.5 adapter，占位接口。
 
-- bentele.models/prompting.py
+- rlinf.projects.robotwin.models/prompting.py
   prompt 组装。
 
-- bentele.runners/embodied_runner.py
+- rlinf.projects.robotwin.runners/embodied_runner.py
   本地简化 runner。
 
-- bentele.workers/*
+- rlinf.projects.robotwin.workers/*
   本地简化 actor/env/reward/rollout worker。
   
   这部分现在更适合当“接口草图”和“教学样例”，不适合当你真正的训练主线。
@@ -203,7 +203,7 @@ my_rllnf
 
 看：
 
-- `src/bentele/cli/train_embodied.py:11`
+- `src/rlinf/projects/robotwin/cli/train_embodied.py:11`
 
 关键代码：
 
@@ -224,7 +224,7 @@ my_rllnf
 
 看：
 
-- `src/bentele/integration/rlinf_embodied.py:99`
+- `src/rlinf/projects/robotwin/integration/rlinf_embodied.py:99`
 
 同步入口：
 
@@ -286,11 +286,11 @@ my_rllnf
 
 主配置：
 
-- [robotwin_place_phone_stand_ppo_openpi_pi05.yaml](/home/kqg/bentele/src/bentele/configs/embodiment/robotwin_place_phone_stand_ppo_openpi_pi05.yaml:1)
+- [robotwin_place_phone_stand_ppo_openpi_pi05.yaml](/home/kqg/bentele/src/rlinf/projects/robotwin/configs/embodiment/robotwin_place_phone_stand_ppo_openpi_pi05.yaml:1)
 
 环境配置：
 
-- [robotwin_place_phone_stand.yaml](/home/kqg/bentele/src/bentele/configs/embodiment/env/robotwin_place_phone_stand.yaml:1)
+- [robotwin_place_phone_stand.yaml](/home/kqg/bentele/src/rlinf/projects/robotwin/configs/embodiment/env/robotwin_place_phone_stand.yaml:1)
 
 这一步解析出来的关键字段是：
 
@@ -628,7 +628,7 @@ trace 里这次拿到的是：
 
 看：
 
-- `src/bentele/integration/rlinf_embodied.py:40`
+- `src/rlinf/projects/robotwin/integration/rlinf_embodied.py:40`
 
 函数：
 
@@ -670,7 +670,7 @@ trace 里这次拿到的是：
 
 回到：
 
-- `src/bentele/integration/rlinf_embodied.py:99`
+- `src/rlinf/projects/robotwin/integration/rlinf_embodied.py:99`
 
 继续看：
 

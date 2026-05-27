@@ -3,9 +3,9 @@ requires = ["hatchling>=1.25"]
 build-backend = "hatchling.build"
 
 [project]
-name = "bentele"
+name = "rlinf"
 version = "0.1.0"
-description = "Clean RLinf-style VLA and RL scaffold for pi0.5-based real-world work."
+description = "RLinf-style VLA and RL scaffold for pi0.5-based RoboTwin work."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -20,7 +20,8 @@ train = [
 ]
 
 [project.scripts]
-bentele-train-embodied = "bentele.cli.train_embodied:main"
+bentele-train-embodied = "rlinf.projects.robotwin.cli.train_embodied:main"
+rlinf-train-embodied = "rlinf.projects.robotwin.cli.train_embodied:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/bentele", "src/rlinf", "src/openpi", "src/openpi_client"]
+packages = ["src/rlinf", "src/openpi", "src/openpi_client"]

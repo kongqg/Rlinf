@@ -1,4 +1,4 @@
-# bentele Multi-Agent Guide
+# RLinf RoboTwin Multi-Agent Guide
 
 Use structured collaboration by default for non-trivial work in this repository.
 

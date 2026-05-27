@@ -1,127 +1,171 @@
-# bentele
+# RLinf RoboTwin
 
-`bentele` is the project-facing package for this repository.
+这个仓库现在按上游 RLinf 的目录风格组织：核心框架代码放在 `src/rlinf/`，RoboTwin/pi0.5 相关的项目 glue code 放在 `src/rlinf/projects/robotwin/`。
 
-The repository now has a deliberate three-layer split:
+`bentele` 不再作为 Python package 路径使用。后续项目代码 import 应该走：
 
-- `src/bentele/`: project layer, entrypoints, project configs, integration glue
-- `src/rlinf/`: vendored RL engine layer
-- `src/openpi/` and `src/openpi_client/`: vendored pi0.5 model and runtime layer
+```python
+import rlinf.projects.robotwin
+```
 
-Inside `bentele`, there are still two kinds of code:
+注意：部分历史实验配置里仍然保留 `wandb_project=bentele`、本地输出目录名里带 `bentele`。这些是为了兼容之前实验和对比结果，不代表 Python 包名还是 `bentele`。
 
-- the new primary path:
-  - `bentele.cli`
-  - `bentele.configs`
-  - `bentele.integration`
-- the older lightweight local scaffold:
-  - `bentele.algorithms`
-  - `bentele.data`
-  - `bentele.envs`
-  - `bentele.models`
-  - `bentele.runners`
-  - `bentele.scheduler`
-  - `bentele.workers`
-
-That split is intentional: `bentele` owns project orchestration, while `rlinf`
-and `openpi` stay vendored as reusable engine packages.
-
-The repository still avoids copying the entire upstream surface:
-
-- Ray cluster scheduling
-- multi-node placement backends
-- Megatron / vLLM / SGLang infrastructure
-- most benchmark-specific task implementations
-
-At the same time, the repository now vendors:
-
-- a trimmed upstream `RLinf` subset under `src/rlinf/`
-- the `RLinf/openpi` runtime needed for `pi0.5` loading under `src/openpi/`
-- the matching `openpi_client` helpers under `src/openpi_client/`
-
-This keeps the original PPO, SAC, and `pi0.5` weight-loading paths available
-locally without dragging in the full upstream project surface. See `THIRD_PARTY.md`.
-
-The current local vendor is intentionally narrowed to a single simulation path:
-
-- `RoboTwin place_phone_stand`
-- `pi0.5 / openpi`
-- PPO training through `bentele -> rlinf`
-
-## Layout
+## 目录结构
 
 ```text
-src/bentele/
-  cli/
-  configs/
-  integration/
-  algorithms/        # older local scaffold
-  data/              # older local scaffold
-  envs/              # older local scaffold
-  models/            # older local scaffold
-  runners/           # older local scaffold
-  scheduler/         # older local scaffold
-  utils/             # older local scaffold
-  workers/           # older local scaffold
+src/
+  rlinf/
+    algorithms/                 # RL 算法和 loss
+    data/                       # 通用数据结构
+    envs/                       # 环境封装，包括 RoboTwin env wrapper
+    hybrid_engines/             # FSDP / 分布式训练相关工具
+    models/                     # embodied model wrapper，包括 OpenPI/pi0.5
+    projects/
+      robotwin/
+        cli/                    # 可 import 的命令行入口
+        configs/                # RoboTwin 实验 Hydra 配置
+        integration/            # project config 到 RLinf runner 的桥接层
+        robotwin/               # dataset、eval、norm stats、probe
+        runtime/                # path、env var、logging、seed、device 工具
+        training/
+          sft/                  # VLA SFT 训练代码
+          local_rl/             # 本地 RL fine-tune 代码
+        utils/                  # 兼容旧 eval API 的项目工具
+    runners/                    # RLinf runner
+    scheduler/                  # cluster、placement、worker scheduling
+    utils/                      # RLinf 通用工具
+    workers/                    # actor/env/rollout/reward worker
 
-src/rlinf/
-src/openpi/
-src/openpi_client/
+  openpi/                       # vendored OpenPI runtime 子集
+  openpi_client/                # vendored OpenPI client helper
 
-scripts/
-  compute_robotwin_norm_stats.py
-  trace_robotwin_pipeline.py
+scripts/                        # 保持兼容的脚本入口
+agents/                         # 本地多 agent role prompt
+docs/                           # pipeline 说明文档
+examples/                       # 轻量 example
+skills/                         # 本地 Codex skill
+model/                          # 本地实验产物，不是源码主路径
 ```
 
-## Current goal
+## 主要入口
 
-This scaffold is meant to be the clean base for:
-
-- validating whether pi0.5 weights can be loaded cleanly
-- running a shared VLA baseline with staged prompts
-- wiring in RL before task-specific MDP choices are finalized
-- later attaching real robot adapters and task definitions
-
-## Quick smoke test
+旧的 `scripts/` 路径继续保留，已有 shell 调用不需要改：
 
 ```bash
-cd /home/kqg/bentele
-PYTHONPATH=src python3 scripts/smoke_scaffold.py
+python scripts/train_robotwin_vla.py --help
+torchrun --nproc_per_node=2 scripts/train_robotwin_vla.py --help
+python scripts/train_robotwin_vla_lora.py --help
+python scripts/train_robotwin_local_rl.py --help
+python scripts/eval_robotwin_policy.py --help
+python scripts/compute_robotwin_norm_stats.py --help
 ```
 
-## OpenPI Setup
+对应的新 module 入口是：
 
 ```bash
-cd /home/kqg/bentele
+PYTHONPATH=src python -m rlinf.projects.robotwin.cli.train_robotwin_vla --help
+PYTHONPATH=src python -m rlinf.projects.robotwin.cli.train_robotwin_local_rl --help
+PYTHONPATH=src python -m rlinf.projects.robotwin.cli.eval_robotwin_policy --help
+PYTHONPATH=src python -m rlinf.projects.robotwin.cli.compute_robotwin_norm_stats --help
+PYTHONPATH=src python -m rlinf.projects.robotwin.cli.train_embodied --help
+```
+
+## RoboTwin 项目模块
+
+- `cli/`：薄入口，只负责解析 CLI，然后调用训练或评测逻辑。
+- `configs/embodiment/`：RoboTwin `place_phone_stand` 的 Hydra 配置。
+- `integration/rlinf_embodied.py`：校验 Hydra config，并启动 RLinf embodied runner。
+- `robotwin/dataset.py`：本地 RoboTwin V3 数据集 adapter。
+- `robotwin/eval.py` 和 `utils/robotwin_eval.py`：policy eval 逻辑和旧 API 兼容层。
+- `robotwin/norm_stats.py`：state/action normalization stats 计算。
+- `robotwin/probes.py`：固定样本的 rollout-style action probe。
+- `training/sft/`：VLA supervised fine-tuning，包括 args、data、model、FSDP、optim、checkpoint、eval、trainer。
+- `training/local_rl/`：本地 RL fine-tuning，包括 rollout、batch、optim、metrics、checkpoint、eval、runner。
+- `runtime/`：项目共享的路径、环境变量、随机种子、device、logging 工具。
+
+## 安装
+
+```bash
 pip install -r requirements.txt
 python scripts/patch_transformers_for_openpi.py
 ```
 
-If you need robot-node extras such as camera or spacemouse support, install
-`requirements-realworld.txt` on that machine instead of the base requirements
-file.
-
-## RoboTwin Phone Task
+只有机器人节点需要相机或 spacemouse 相关依赖时，才安装：
 
 ```bash
-cd /home/kqg/bentele
-python scripts/patch_transformers_for_openpi.py
-export OPENPI_MODEL_PATH=/abs/path/to/pi05_base_torch
-python -m bentele.cli.train_embodied \
-  --config-name robotwin_place_phone_stand_ppo_openpi_pi05 \
-  env.train.assets_path=/abs/path/to/RoboTwin \
-  env.eval.assets_path=/abs/path/to/RoboTwin
+pip install -r requirements-realworld.txt
 ```
 
-The repo is intentionally trimmed around this one path so the active code is:
+只有跑 ManiSkill 相关 smoke path 时，才安装：
 
-- `src/bentele/configs/embodiment/robotwin_place_phone_stand_ppo_openpi_pi05.yaml`
-- `src/bentele/configs/embodiment/env/robotwin_place_phone_stand.yaml`
-- `src/rlinf/envs/robotwin/`
-- `src/rlinf/models/embodiment/openpi/dataconfig/robotwin_aloha_dataconfig.py`
+```bash
+pip install -r requirements-maniskill.txt
+```
 
-## Next steps
+## 常用工作流
 
-- define project-specific observation and action schemas
-- attach the real robot adapter
-- add task-specific reward, reset, and evaluation logic
+SFT 训练：
+
+```bash
+python scripts/train_robotwin_vla.py --help
+```
+
+LoRA SFT 训练：
+
+```bash
+python scripts/train_robotwin_vla_lora.py --help
+```
+
+本地 RL fine-tune：
+
+```bash
+python scripts/train_robotwin_local_rl.py --help
+```
+
+单独 eval：
+
+```bash
+python scripts/eval_robotwin_policy.py --help
+```
+
+计算 norm stats：
+
+```bash
+python scripts/compute_robotwin_norm_stats.py --help
+```
+
+排查 pipeline：
+
+```bash
+python scripts/trace_robotwin_pipeline.py --help
+```
+
+匹配 RoboTwin env reset seed 和 dataset episode：
+
+```bash
+python scripts/match_robotwin_episode_seeds.py --help
+```
+
+预设 shell 脚本：
+
+- `scripts/run_robotwin_lora_rl_from_sft13k.sh`：从 SFT checkpoint 启动 LoRA RL 的 preset。
+- `scripts/trigger_continue_full_sft_after_10k.sh`：从 10k step checkpoint 继续 full SFT 的 preset。
+
+## 当前主要实验路径
+
+当前仓库主要围绕这一条任务路径：
+
+- 任务：`RoboTwin place_phone_stand`
+- 模型：`pi0.5 / OpenPI`
+- SFT 训练：`src/rlinf/projects/robotwin/training/sft/`
+- 本地 RL 训练：`src/rlinf/projects/robotwin/training/local_rl/`
+- RLinf embodied 配置：`src/rlinf/projects/robotwin/configs/embodiment/`
+- RoboTwin env wrapper：`src/rlinf/envs/robotwin/`
+- OpenPI action model：`src/rlinf/models/embodiment/openpi/`
+
+## 第三方代码
+
+这个仓库 vendored 了一部分上游 RLinf 和 OpenPI 代码。来源和 license 说明见：
+
+- `THIRD_PARTY.md`
+- `THIRD_PARTY_LICENSES/`

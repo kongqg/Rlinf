@@ -12,10 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import torch
 from omegaconf import OmegaConf
 
 _REGISTERED = False
+
+
+def _resolve_torch_dtype(dtype_name: str):
+    import torch
+
+    return getattr(torch, dtype_name)
 
 
 def omegaconf_register():
@@ -26,9 +31,7 @@ def omegaconf_register():
     OmegaConf.register_new_resolver("int_div", lambda x, y: x // y)
     OmegaConf.register_new_resolver("subtract", lambda x, y: x - y)
     OmegaConf.register_new_resolver("not", lambda x: not bool(x))
-    OmegaConf.register_new_resolver(
-        "torch.dtype", lambda dtype_name: getattr(torch, dtype_name), replace=True
-    )
+    OmegaConf.register_new_resolver("torch.dtype", _resolve_torch_dtype, replace=True)
     _REGISTERED = True
 
 

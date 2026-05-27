@@ -18,7 +18,7 @@ _SRC = Path(__file__).resolve().parents[1] / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from bentele.training.sft.args import Args as BaseArgs
+from rlinf.projects.robotwin.training.sft.args import Args as BaseArgs
 
 
 @dataclass(frozen=True)
@@ -31,6 +31,6 @@ class Args(BaseArgs):
 
 if __name__ == "__main__":
     args = tyro.cli(Args)
-    from bentele.training.sft.trainer import run
+    from rlinf.projects.robotwin.training.sft.trainer import run
 
     run(args)
