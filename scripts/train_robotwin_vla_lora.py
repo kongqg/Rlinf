@@ -8,12 +8,17 @@ while RLinf-style PEFT LoRA is enabled for the OpenPI VLM subtree.
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 
 import tyro
 
-from train_robotwin_vla import Args as BaseArgs
-from train_robotwin_vla import run
+_SRC = Path(__file__).resolve().parents[1] / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
+from bentele.training.sft.args import Args as BaseArgs
 
 
 @dataclass(frozen=True)
@@ -25,4 +30,7 @@ class Args(BaseArgs):
 
 
 if __name__ == "__main__":
-    run(tyro.cli(Args))
+    args = tyro.cli(Args)
+    from bentele.training.sft.trainer import run
+
+    run(args)
