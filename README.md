@@ -1,14 +1,6 @@
-# RLinf RoboTwin
+# RLinf
 
-这个仓库现在按上游 RLinf 的目录风格组织：核心框架代码放在 `src/rlinf/`，RoboTwin/pi0.5 相关的项目 glue code 放在 `src/rlinf/projects/robotwin/`。
-
-`bentele` 不再作为 Python package 路径使用。后续项目代码 import 应该走：
-
-```python
-import rlinf.projects.robotwin
-```
-
-注意：部分历史实验配置里仍然保留 `wandb_project=bentele`、本地输出目录名里带 `bentele`。这些是为了兼容之前实验和对比结果，不代表 Python 包名还是 `bentele`。
+这个仓库按上游 RLinf 的目录风格组织：核心框架代码放在 `src/rlinf/`，RoboTwin/pi0.5 相关代码放在 `src/rlinf/projects/robotwin/`。
 
 ## 目录结构
 
@@ -47,20 +39,16 @@ skills/                         # 本地 Codex skill
 model/                          # 本地实验产物，不是源码主路径
 ```
 
-## 主要入口
+## 项目路径
 
-旧的 `scripts/` 路径继续保留，已有 shell 调用不需要改：
+本地默认项目路径：
 
 ```bash
-python scripts/train_robotwin_vla.py --help
-torchrun --nproc_per_node=2 scripts/train_robotwin_vla.py --help
-python scripts/train_robotwin_vla_lora.py --help
-python scripts/train_robotwin_local_rl.py --help
-python scripts/eval_robotwin_policy.py --help
-python scripts/compute_robotwin_norm_stats.py --help
+cd /home/kqg/bentele
+export PYTHONPATH=$PWD/src
 ```
 
-对应的新 module 入口是：
+## 主要入口
 
 ```bash
 PYTHONPATH=src python -m rlinf.projects.robotwin.cli.train_robotwin_vla --help
@@ -102,21 +90,186 @@ pip install -r requirements-realworld.txt
 pip install -r requirements-maniskill.txt
 ```
 
-## 常用工作流
+## 基本使用示例
 
-SFT 训练：
+先按本地实际路径设置这些变量：
+
+```bash
+cd /home/kqg/bentele
+export PYTHONPATH=$PWD/src
+
+export ROBOTWIN_ASSETS=/path/to/RoboTwin
+export DATASET_ROOT=/path/to/robotwin_lerobot_datasets
+export BASE_PI05=/path/to/pi05_base_torch
+export OUTPUT_ROOT=/data/120T/kqg/bentele/model
+```
+
+### 1. 计算 norm stats
+
+```bash
+python scripts/compute_robotwin_norm_stats.py \
+  --dataset-dirs "$DATASET_ROOT/place_phone_stand" \
+  --output-dir "$BASE_PI05" \
+  --config-name pi05_aloha_robotwin
+```
+
+### 2. 跑 full VLA SFT
+
+单卡：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python scripts/train_robotwin_vla.py \
+  --dataset-root "$DATASET_ROOT" \
+  --train-repo-ids place_phone_stand \
+  --model-path "$BASE_PI05" \
+  --output-dir "$OUTPUT_ROOT/pi05_place_phone_stand_vla_fullft" \
+  --assets-path "$ROBOTWIN_ASSETS" \
+  --batch-size 64 \
+  --train-steps 10000 \
+  --save-every 500 \
+  --save-step-checkpoints \
+  --eval-every 0 \
+  --wandb-enabled
+```
+
+两卡 FSDP：
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 \
+  scripts/train_robotwin_vla.py \
+  --dataset-root "$DATASET_ROOT" \
+  --train-repo-ids place_phone_stand \
+  --model-path "$BASE_PI05" \
+  --output-dir "$OUTPUT_ROOT/pi05_place_phone_stand_vla_fullft_fsdp2" \
+  --assets-path "$ROBOTWIN_ASSETS" \
+  --batch-size 64 \
+  --train-steps 10000 \
+  --save-every 500 \
+  --save-step-checkpoints \
+  --distributed-backend fsdp \
+  --eval-every 0 \
+  --wandb-enabled
+```
+
+### 3. 跑 LoRA SFT
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python scripts/train_robotwin_vla_lora.py \
+  --dataset-root "$DATASET_ROOT" \
+  --train-repo-ids place_phone_stand \
+  --model-path "$BASE_PI05" \
+  --output-dir "$OUTPUT_ROOT/pi05_place_phone_stand_vla_lora" \
+  --assets-path "$ROBOTWIN_ASSETS" \
+  --batch-size 64 \
+  --train-steps 10000 \
+  --save-every 500 \
+  --save-step-checkpoints \
+  --lora-rank 32 \
+  --eval-every 0 \
+  --wandb-enabled
+```
+
+如果要从已有 LoRA adapter 继续训：
+
+```bash
+python scripts/train_robotwin_vla_lora.py \
+  --dataset-root "$DATASET_ROOT" \
+  --train-repo-ids place_phone_stand \
+  --model-path "$BASE_PI05" \
+  --lora-path /path/to/previous_lora_checkpoint \
+  --output-dir "$OUTPUT_ROOT/pi05_place_phone_stand_vla_lora_continue" \
+  --assets-path "$ROBOTWIN_ASSETS" \
+  --batch-size 64 \
+  --train-steps 10000 \
+  --save-every 500 \
+  --save-step-checkpoints \
+  --wandb-enabled
+```
+
+### 4. 单独评估 checkpoint
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python scripts/eval_robotwin_policy.py \
+  --assets-path "$ROBOTWIN_ASSETS" \
+  --model-path "$OUTPUT_ROOT/pi05_place_phone_stand_vla_fullft/checkpoints/step_0010000" \
+  --num-envs 30 \
+  --eval-step-limit 400 \
+  --eval-rollout-epochs 1 \
+  --record-progress \
+  --device cuda \
+  --output-json "$OUTPUT_ROOT/evals/fullft_step10000_eval30.json"
+```
+
+固定 eval seeds：
+
+```bash
+python scripts/eval_robotwin_policy.py \
+  --assets-path "$ROBOTWIN_ASSETS" \
+  --model-path /path/to/checkpoint \
+  --num-envs 30 \
+  --eval-step-limit 400 \
+  --eval-seeds-path /path/to/eval_seeds.json \
+  --record-progress \
+  --output-json /path/to/eval_result.json
+```
+
+### 5. 跑本地 RL fine-tune
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python scripts/train_robotwin_local_rl.py \
+  --assets-path "$ROBOTWIN_ASSETS" \
+  --model-path "$OUTPUT_ROOT/pi05_place_phone_stand_vla_fullft/checkpoints/step_0010000" \
+  --output-dir "$OUTPUT_ROOT/pi05_place_phone_stand_local_rl" \
+  --total-steps 20000 \
+  --total-num-envs 8 \
+  --rollout-epoch 4 \
+  --max-steps-per-rollout-epoch 200 \
+  --global-batch-size 32 \
+  --micro-batch-size 4 \
+  --update-epoch 2 \
+  --entropy-bonus 0.02 \
+  --save-every 500 \
+  --eval-every 100 \
+  --eval-num-envs 20 \
+  --wandb-enabled
+```
+
+### 6. 排查 pipeline
+
+```bash
+python scripts/trace_robotwin_pipeline.py \
+  --assets-path "$ROBOTWIN_ASSETS" \
+  --model-path "$BASE_PI05"
+```
+
+### 7. 匹配 dataset episode 和 env seed
+
+```bash
+python scripts/match_robotwin_episode_seeds.py \
+  --dataset-root "$DATASET_ROOT" \
+  --repo-id place_phone_stand \
+  --robotwin-path "$ROBOTWIN_ASSETS" \
+  --task-config-path "$ROBOTWIN_ASSETS/task_config/_base_task_config.yaml" \
+  --episode-indices 0 1 2 3 4 \
+  --candidate-seeds-path "$PWD/src/rlinf/envs/robotwin/seeds/seed_status.json" \
+  --output-json traces/eval30_fixed_seeds.json
+```
+
+## 快速查看参数
+
+VLA SFT：
 
 ```bash
 python scripts/train_robotwin_vla.py --help
 ```
 
-LoRA SFT 训练：
+LoRA SFT：
 
 ```bash
 python scripts/train_robotwin_vla_lora.py --help
 ```
 
-本地 RL fine-tune：
+本地 RL：
 
 ```bash
 python scripts/train_robotwin_local_rl.py --help
