@@ -16,24 +16,31 @@ from datetime import timedelta
 import json
 import math
 import os
-import random
 import shutil
 import traceback
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from pathlib import Path
 import time
 from typing import Any, Literal
 
+from bentele.robotwin.dataset import RoboTwinV3LocalDataset
+from bentele.robotwin.probes import (
+    RolloutProbeSample,
+    _build_rollout_probe_samples,
+    _compute_rollout_probe_metrics,
+)
+from bentele.runtime.device import device_for_training as _device_of
 from bentele.runtime.env import ensure_torch_transformers_runtime
+from bentele.runtime.logging import WandbLogger as _WandbLogger
 from bentele.runtime.paths import REPO_ROOT
+from bentele.runtime.seed import _set_seed
+from bentele.training.sft.args import Args, DistributedContext
 
 # Force transformers/openpi onto the torch path before importing any model code.
 ensure_torch_transformers_runtime()
 
 import numpy as np
 from omegaconf import OmegaConf
-import pyarrow as pa
-import pyarrow.parquet as pq
 import torch
 import torch.distributed as dist
 from torch.distributed.fsdp import (
@@ -49,128 +56,11 @@ from torch.utils import _pytree
 from torch.utils.data import ConcatDataset
 import tyro
 
-from bentele.utils.robotwin_eval import run_robotwin_policy_eval, save_eval_result
 import openpi.shared.normalize as normalize
+from bentele.utils.robotwin_eval import run_robotwin_policy_eval, save_eval_result
 from rlinf.models.embodiment.base_policy import ForwardType
 from rlinf.models.embodiment.openpi.dataconfig import get_openpi_config
 from rlinf.utils.pytree import register_pytree_dataclasses
-
-
-FPS = 30.0
-CAMERA_KEYS = (
-    "observation.images.cam_high",
-    "observation.images.cam_left_wrist",
-    "observation.images.cam_right_wrist",
-)
-
-
-@dataclass(frozen=True)
-class Args:
-    dataset_root: str
-    train_repo_ids: Sequence[str]
-    model_path: str
-    output_dir: str
-    train_episode_indices: tuple[int, ...] = ()
-    train_num_episodes_limit: int = 0
-    train_sample_limit: int = 0
-    config_name: str = "pi05_aloha_robotwin"
-    eval_config_name: str = "robotwin_place_phone_stand_ppo_openpi_pi05"
-    batch_size: int = 8
-    grad_accum_steps: int = 1
-    train_steps: int = 20000
-    learning_rate: float = 2.5e-5
-    min_learning_rate: float = 2.5e-6
-    lr_warmup_steps: int = 1000
-    lr_total_steps: int = 30000
-    lr_num_cycles: float = 0.5
-    lr_scheduler: Literal["none", "cosine"] = "cosine"
-    weight_decay: float = 1.0e-10
-    clip_grad_norm: float = 1.0
-    log_every: int = 20
-    save_every: int = 200
-    save_step_checkpoints: bool = False
-    num_workers: int = 0
-    seed: int = 1234
-    device: str = "cuda"
-    use_quantile_norm: bool = False
-    is_lora: bool = False
-    lora_rank: int = 32
-    lora_path: str | None = None
-    assets_path: str | None = None
-    eval_every: int = 0
-    eval_num_envs: int = 1
-    eval_rollout_epochs: int = 1
-    eval_seeds_path: str | None = None
-    eval_step_limit: int | None = None
-    eval_max_chunk_steps: int | None = None
-    eval_action_exec_horizon: int | None = None
-    eval_record_progress: bool = True
-    eval_visualize: bool = False
-    eval_render_freq: int = 10
-    eval_sleep_between_chunks: float = 0.0
-    eval_hold_viewer_seconds: float = 0.0
-    eval_device: str = "cpu"
-    eval_debug_log_chunks: bool = False
-    eval_debug_action_steps: int = 0
-    action_probe_every: int = 100
-    action_probe_num_samples: int = 5
-    wandb_enabled: bool = False
-    wandb_project: str = "bentele"
-    wandb_run_name: str | None = None
-    wandb_group: str | None = None
-    wandb_log_dir: str | None = None
-    wandb_proxy: str | None = None
-    wandb_mode: Literal["online", "offline", "disabled"] = "online"
-    wandb_tags: tuple[str, ...] = ()
-    distributed_backend: Literal["none", "fsdp"] = "none"
-    dist_timeout_minutes: int = 60
-    fsdp_sharding_strategy: Literal["full_shard", "shard_grad_op"] = "full_shard"
-    fsdp_mixed_precision: Literal["bf16", "fp32"] = "bf16"
-    fsdp_cpu_offload: bool = False
-    fsdp_use_orig_params: bool = True
-    fsdp_lora_auto_wrap: bool = False
-    save_optimizer_state: bool = False
-    debug_stage_logs: bool = True
-    debug_all_ranks: bool = False
-    noise_level: float = 0.5
-
-
-@dataclass(frozen=True)
-class DistributedContext:
-    backend: Literal["none", "fsdp"]
-    rank: int = 0
-    world_size: int = 1
-    local_rank: int = 0
-
-    @property
-    def is_distributed(self) -> bool:
-        return self.backend != "none"
-
-    @property
-    def is_main(self) -> bool:
-        return self.rank == 0
-
-
-class _WandbLogger:
-    def __init__(self, run: Any):
-        self.run = run
-
-    def log(self, data: dict[str, Any], step: int) -> None:
-        self.run.log(data, step=step)
-
-    def finish(self) -> None:
-        self.run.finish()
-
-
-@dataclass(frozen=True)
-class RolloutProbeSample:
-    repo_id: str
-    dataset_item: int
-    prompt: str
-    state: np.ndarray
-    target_actions: np.ndarray
-    main_image: np.ndarray
-    wrist_images: np.ndarray
 
 
 def _log_stage(
@@ -186,22 +76,6 @@ def _log_stage(
         return
     now = time.strftime("%Y-%m-%d %H:%M:%S")
     print(f"[train_robotwin_vla][{now}][rank {dist_ctx.rank}] {message}", flush=True)
-
-
-def _set_seed(seed: int) -> None:
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-
-
-def _device_of(device: str, dist_ctx: DistributedContext) -> torch.device:
-    if device == "cuda" and not torch.cuda.is_available():
-        return torch.device("cpu")
-    if dist_ctx.is_distributed and device == "cuda":
-        return torch.device("cuda", dist_ctx.local_rank)
-    return torch.device(device)
 
 
 def _init_distributed(args: Args) -> DistributedContext:
@@ -302,298 +176,6 @@ def _build_train_config(
         repo_id=repo_id,
         data_kwargs={"use_quantile_norm": use_quantile_norm},
     )
-
-
-class RoboTwinV3LocalDataset(torch.utils.data.Dataset):
-    def __init__(
-        self,
-        dataset_dir: Path,
-        action_horizon: int,
-        *,
-        episode_indices: Sequence[int] | None = None,
-        episode_limit: int | None = None,
-        max_samples: int | None = None,
-    ):
-        self.dataset_dir = dataset_dir
-        self.action_horizon = action_horizon
-        self._video_handles: dict[str, Any] = {}
-        self._last_frame_index: dict[str, int] = {}
-
-        data_tables = []
-        for parquet_path in sorted((dataset_dir / "data").glob("chunk-*/file-*.parquet")):
-            data_tables.append(pq.read_table(parquet_path))
-        if not data_tables:
-            raise FileNotFoundError(f"No parquet files found under {dataset_dir / 'data'}")
-        merged = data_tables[0] if len(data_tables) == 1 else pa.concat_tables(data_tables)
-
-        self.states = np.stack(merged.column("observation.state").to_pylist()).astype(np.float32)
-        self.actions = np.stack(merged.column("action").to_pylist()).astype(np.float32)
-        self.frame_index = np.asarray(merged.column("frame_index")).astype(np.int64)
-        self.episode_index = np.asarray(merged.column("episode_index")).astype(np.int64)
-
-        episode_tables = []
-        for parquet_path in sorted((dataset_dir / "meta" / "episodes").glob("chunk-*/file-*.parquet")):
-            episode_tables.append(pq.read_table(parquet_path))
-        if not episode_tables:
-            raise FileNotFoundError(f"No episode parquet files found under {dataset_dir / 'meta' / 'episodes'}")
-        episodes = episode_tables[0] if len(episode_tables) == 1 else pa.concat_tables(episode_tables)
-
-        self.episode_meta: dict[int, dict[str, Any]] = {}
-        for row in episodes.to_pylist():
-            episode_idx = int(row["episode_index"])
-            self.episode_meta[episode_idx] = row
-
-        if episode_indices and episode_limit is not None:
-            raise ValueError("episode_indices and episode_limit cannot be used together.")
-
-        available_episode_indices = sorted(self.episode_meta)
-        if episode_indices:
-            selected_episode_indices = sorted({int(idx) for idx in episode_indices})
-            missing_episode_indices = [
-                idx for idx in selected_episode_indices if idx not in self.episode_meta
-            ]
-            if missing_episode_indices:
-                raise ValueError(
-                    "Requested episode indices are missing from dataset "
-                    f"{dataset_dir}: {missing_episode_indices}"
-                )
-        elif episode_limit is not None:
-            if episode_limit <= 0:
-                raise ValueError(f"episode_limit must be positive, but got {episode_limit}.")
-            selected_episode_indices = available_episode_indices[:episode_limit]
-        else:
-            selected_episode_indices = available_episode_indices
-        if not selected_episode_indices:
-            raise ValueError(f"No episodes selected from dataset {dataset_dir}.")
-        self.selected_episode_indices = selected_episode_indices
-
-        self.sample_indices: list[int] = []
-        self.samples_per_episode: dict[int, int] = {}
-        for episode_idx in self.selected_episode_indices:
-            meta = self.episode_meta[episode_idx]
-            start = int(meta["dataset_from_index"])
-            stop = int(meta["dataset_to_index"])
-            last_valid = stop - self.action_horizon + 1
-            if last_valid <= start:
-                self.samples_per_episode[episode_idx] = 0
-                continue
-            episode_sample_indices = list(range(start, last_valid))
-            self.samples_per_episode[episode_idx] = len(episode_sample_indices)
-            self.sample_indices.extend(episode_sample_indices)
-        if max_samples is not None and max_samples > 0:
-            self.sample_indices = self.sample_indices[:max_samples]
-        if not self.sample_indices:
-            raise ValueError(
-                f"No valid samples found in dataset {dataset_dir} for "
-                f"episodes={self.selected_episode_indices} with action_horizon={action_horizon}."
-            )
-
-    def __len__(self) -> int:
-        return len(self.sample_indices)
-
-    def _open_video(self, video_path: Path):
-        import av
-
-        key = str(video_path)
-        if key not in self._video_handles:
-            container = av.open(key)
-            stream = container.streams.video[0]
-            self._video_handles[key] = (container, stream)
-            self._last_frame_index[key] = -1
-        return self._video_handles[key]
-
-    def _read_video_frame(self, video_path: Path, frame_index: int) -> np.ndarray:
-        container, stream = self._open_video(video_path)
-        key = str(video_path)
-        # The torch DataLoader may revisit the same sample or move backward in
-        # time after shuffling. Reopen the container whenever access is not
-        # strictly increasing to keep `__getitem__` idempotent.
-        if frame_index <= self._last_frame_index[key]:
-            container.close()
-            del self._video_handles[key]
-            container, stream = self._open_video(video_path)
-
-        if frame_index > self._last_frame_index[key] + 1:
-            avg_rate = float(stream.average_rate)
-            time_base = float(stream.time_base)
-            target_pts = int(frame_index / avg_rate / time_base)
-            container.seek(target_pts, stream=stream, any_frame=False, backward=True)
-
-        for frame in container.decode(stream):
-            if frame.pts is None:
-                continue
-            current_index = int(
-                round(float(frame.pts) * float(stream.time_base) * float(stream.average_rate))
-            )
-            if current_index < frame_index:
-                continue
-            rgb = frame.to_ndarray(format="rgb24")
-            self._last_frame_index[key] = current_index
-            if current_index == frame_index:
-                return rgb
-
-        raise RuntimeError(f"Failed to decode frame {frame_index} from {video_path}")
-
-    def __getitem__(self, item: int) -> dict[str, Any]:
-        sample_idx = self.sample_indices[item]
-        episode_idx = int(self.episode_index[sample_idx])
-        meta = self.episode_meta[episode_idx]
-
-        prompt = meta["tasks"][0]
-        obs_state = self.states[sample_idx]
-        action_seq = self.actions[sample_idx : sample_idx + self.action_horizon]
-        local_frame_index = int(self.frame_index[sample_idx])
-
-        sample = {
-            "observation.state": obs_state,
-            "action": action_seq,
-            "prompt": prompt,
-        }
-
-        for camera_key in CAMERA_KEYS:
-            chunk_idx = int(meta[f"videos/{camera_key}/chunk_index"])
-            file_idx = int(meta[f"videos/{camera_key}/file_index"])
-            from_timestamp = float(meta[f"videos/{camera_key}/from_timestamp"])
-            video_path = (
-                self.dataset_dir
-                / "videos"
-                / camera_key
-                / f"chunk-{chunk_idx:03d}"
-                / f"file-{file_idx:03d}.mp4"
-            )
-            absolute_frame_index = int(round(from_timestamp * FPS)) + local_frame_index
-            sample[camera_key] = self._read_video_frame(video_path, absolute_frame_index)
-
-        return sample
-
-
-def _evenly_spaced_positions(length: int, count: int) -> list[int]:
-    if length <= 0 or count <= 0:
-        return []
-    if count >= length:
-        return list(range(length))
-    positions = np.linspace(0, length - 1, num=count, dtype=int)
-    return [int(pos) for pos in positions.tolist()]
-
-
-def _build_rollout_probe_samples(
-    args: Args,
-    *,
-    action_horizon: int,
-) -> list[RolloutProbeSample]:
-    if args.action_probe_num_samples <= 0:
-        return []
-
-    dataset_root = Path(args.dataset_root).expanduser().resolve()
-    raw_datasets: list[tuple[str, RoboTwinV3LocalDataset]] = []
-    for repo_id in args.train_repo_ids:
-        raw_dataset = RoboTwinV3LocalDataset(
-            dataset_root / repo_id,
-            action_horizon=action_horizon,
-            episode_indices=args.train_episode_indices or None,
-            episode_limit=(
-                args.train_num_episodes_limit
-                if args.train_num_episodes_limit > 0
-                else None
-            ),
-            max_samples=args.train_sample_limit if args.train_sample_limit > 0 else None,
-        )
-        if len(raw_dataset) > 0:
-            raw_datasets.append((repo_id, raw_dataset))
-    if not raw_datasets:
-        return []
-
-    per_repo_target = max(
-        1,
-        int(np.ceil(args.action_probe_num_samples / len(raw_datasets))),
-    )
-    selected_positions: list[tuple[str, RoboTwinV3LocalDataset, int]] = []
-    for repo_id, raw_dataset in raw_datasets:
-        for dataset_item in _evenly_spaced_positions(len(raw_dataset), per_repo_target):
-            selected_positions.append((repo_id, raw_dataset, dataset_item))
-
-    probe_samples: list[RolloutProbeSample] = []
-    for repo_id, raw_dataset, dataset_item in selected_positions[: args.action_probe_num_samples]:
-        sample = raw_dataset[dataset_item]
-        wrist_images = np.stack(
-            [
-                sample["observation.images.cam_left_wrist"],
-                sample["observation.images.cam_right_wrist"],
-            ],
-            axis=0,
-        ).astype(np.uint8)
-        probe_samples.append(
-            RolloutProbeSample(
-                repo_id=repo_id,
-                dataset_item=dataset_item,
-                prompt=sample["prompt"],
-                state=sample["observation.state"].astype(np.float32),
-                target_actions=sample["action"].astype(np.float32),
-                main_image=sample["observation.images.cam_high"].astype(np.uint8),
-                wrist_images=wrist_images,
-            )
-        )
-    return probe_samples
-
-
-def _build_probe_env_obs(
-    sample: RolloutProbeSample,
-    device: torch.device,
-) -> dict[str, Any]:
-    return {
-        "main_images": torch.from_numpy(sample.main_image).unsqueeze(0).to(device=device),
-        "wrist_images": torch.from_numpy(sample.wrist_images).unsqueeze(0).to(device=device),
-        "states": torch.from_numpy(sample.state).unsqueeze(0).to(
-            device=device,
-            dtype=torch.float32,
-        ),
-        "task_descriptions": [sample.prompt],
-    }
-
-
-def _compute_rollout_probe_metrics(
-    model: torch.nn.Module,
-    probe_samples: Sequence[RolloutProbeSample],
-    device: torch.device,
-) -> dict[str, float]:
-    if not probe_samples:
-        return {}
-
-    target_model = getattr(model, "module", model)
-    was_training = target_model.training
-    target_model.eval()
-
-    maes = []
-    mses = []
-    pred_abs_means = []
-    target_abs_means = []
-    try:
-        with torch.no_grad():
-            for sample in probe_samples:
-                env_obs = _build_probe_env_obs(sample, device)
-                predicted_actions, _ = target_model.predict_action_batch(
-                    env_obs,
-                    mode="eval",
-                    compute_values=False,
-                )
-                predicted_actions = predicted_actions[0].detach().cpu().float()
-                target_actions = torch.from_numpy(sample.target_actions).float()
-                diff = predicted_actions - target_actions
-                maes.append(float(diff.abs().mean().item()))
-                mses.append(float(diff.square().mean().item()))
-                pred_abs_means.append(float(predicted_actions.abs().mean().item()))
-                target_abs_means.append(float(target_actions.abs().mean().item()))
-    finally:
-        if was_training:
-            target_model.train()
-
-    return {
-        "probe/raw_train_rollout_action_mae": float(np.mean(maes)),
-        "probe/raw_train_rollout_action_mse": float(np.mean(mses)),
-        "probe/raw_train_rollout_pred_abs_mean": float(np.mean(pred_abs_means)),
-        "probe/raw_train_rollout_target_abs_mean": float(np.mean(target_abs_means)),
-        "probe/raw_train_rollout_num_samples": float(len(probe_samples)),
-    }
 
 
 def _build_loader(args: Args, dist_ctx: DistributedContext):

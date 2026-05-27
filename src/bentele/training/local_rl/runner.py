@@ -3,17 +3,20 @@ from __future__ import annotations
 
 import json
 import os
-import random
 import shutil
 import time
 import traceback
 from collections import defaultdict
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from bentele.runtime.env import ensure_torch_transformers_runtime
+from bentele.runtime.logging import WandbLogger as _WandbLogger
+from bentele.runtime.logging import json_ready as _json_ready
 from bentele.runtime.paths import EMBODIMENT_CONFIG_DIR, REPO_ROOT
+from bentele.runtime.seed import seed_everything
+from bentele.training.local_rl.args import Args
 
 # Keep transformers on the torch path and avoid the tensorflow import chain.
 ensure_torch_transformers_runtime()
@@ -43,82 +46,9 @@ from rlinf.utils.utils import masked_mean
 CONFIG_DIR = EMBODIMENT_CONFIG_DIR
 
 
-@dataclass(frozen=True)
-class Args:
-    assets_path: str
-    model_path: str
-    output_dir: str
-    config_name: str = "robotwin_place_phone_stand_ppo_openpi_pi05"
-    device: str = "cuda"
-    seed: int = 1234
-    total_steps: int = 4000
-    total_num_envs: int = 256
-    rollout_epoch: int = 4
-    max_steps_per_rollout_epoch: int = 200
-    max_episode_steps: int = 200
-    global_batch_size: int = 2048
-    micro_batch_size: int = 32
-    update_epoch: int = 5
-    actor_lr: float = 5.0e-6
-    value_lr: float = 1.0e-4
-    weight_decay: float = 1.0e-2
-    clip_grad_norm: float = 1.0
-    entropy_bonus: float = 0.0
-    log_every: int = 10
-    save_every: int = 100
-    eval_every: int = 100
-    eval_num_envs: int = 128
-    eval_rollout_epochs: int = 1
-    eval_device: Literal["cpu", "cuda", "auto"] = "cuda"
-    save_optimizer_state: bool = False
-    wandb_enabled: bool = True
-    wandb_project: str = "bentele"
-    wandb_run_name: str | None = None
-    wandb_log_dir: str | None = None
-    wandb_proxy: str | None = None
-    wandb_mode: Literal["online", "offline", "disabled"] = "online"
-    debug_stage_logs: bool = False
-
-
-class _WandbLogger:
-    def __init__(self, run) -> None:
-        self._run = run
-
-    def log(self, payload: dict[str, float], *, step: int) -> None:
-        if payload:
-            self._run.log(payload, step=step)
-
-    def finish(self) -> None:
-        self._run.finish()
-
-
 def log_stage(message: str, *, enabled: bool) -> None:
     if enabled:
         print(f"[local_rl] {message}", flush=True)
-
-
-def _json_ready(value: Any) -> Any:
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, torch.Tensor):
-        if value.numel() == 1:
-            return value.item()
-        return value.detach().cpu().tolist()
-    if isinstance(value, np.ndarray):
-        return value.tolist()
-    if isinstance(value, dict):
-        return {k: _json_ready(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_json_ready(v) for v in value]
-    return value
-
-
-def seed_everything(seed: int) -> None:
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
 
 
 def _init_wandb_logger(args: Args, output_dir: Path) -> _WandbLogger | None:
