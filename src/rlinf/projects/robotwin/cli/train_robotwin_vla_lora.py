@@ -4,7 +4,9 @@ from dataclasses import dataclass
 
 import tyro
 
+from rlinf.projects.robotwin.adapters.sft_task import RobotwinSFTTaskSpec
 from rlinf.projects.robotwin.training.sft.args import Args as BaseArgs
+from rlinf.training.sft.trainer import run_sft_training
 
 
 @dataclass(frozen=True)
@@ -17,11 +19,8 @@ class Args(BaseArgs):
 
 def main() -> None:
     args = tyro.cli(Args)
-    from rlinf.projects.robotwin.training.sft.trainer import run
-
-    run(args)
+    run_sft_training(args, RobotwinSFTTaskSpec())
 
 
 if __name__ == "__main__":
     main()
-

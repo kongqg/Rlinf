@@ -4,6 +4,8 @@ from typing import Any
 
 import torch
 
+from rlinf.algorithms.registry import calculate_adv_and_returns
+
 
 def process_nested_dict_for_adv(
     nested_dict: dict[str, Any], rollout_epoch: int
@@ -48,3 +50,31 @@ def compute_loss_mask(dones: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     loss_mask_sum = loss_mask_sum.expand_as(loss_mask)
     return loss_mask, loss_mask_sum
 
+
+def prepare_rollout_batch(cfg, rollout_batch: dict[str, Any]):
+    rollout_batch = process_nested_dict_for_adv(
+        rollout_batch, cfg.algorithm.rollout_epoch
+    )
+    if not cfg.env.train.auto_reset and not cfg.env.train.ignore_terminations:
+        loss_mask, loss_mask_sum = compute_loss_mask(rollout_batch["dones"])
+        if cfg.algorithm.reward_type == "chunk_level":
+            loss_mask = loss_mask.any(dim=-1, keepdim=True)
+            loss_mask_sum = loss_mask_sum[..., -1:]
+        rollout_batch["loss_mask"] = loss_mask
+        rollout_batch["loss_mask_sum"] = loss_mask_sum
+
+    adv_kwargs = {
+        "task_type": cfg.runner.task_type,
+        "adv_type": cfg.algorithm.adv_type,
+        "rewards": rollout_batch["rewards"],
+        "dones": rollout_batch["dones"],
+        "values": rollout_batch.get("prev_values", None),
+        "gamma": cfg.algorithm.get("gamma", 1.0),
+        "gae_lambda": cfg.algorithm.get("gae_lambda", 1.0),
+        "group_size": cfg.algorithm.get("group_size", 1),
+        "reward_type": cfg.algorithm.reward_type,
+        "loss_mask": rollout_batch.get("loss_mask", None),
+        "loss_mask_sum": rollout_batch.get("loss_mask_sum", None),
+    }
+    rollout_batch.update(calculate_adv_and_returns(**adv_kwargs))
+    return rollout_batch

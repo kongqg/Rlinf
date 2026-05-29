@@ -22,13 +22,23 @@ from rlinf.projects.robotwin.training.local_rl.args import Args
 ensure_torch_transformers_runtime()
 
 import hydra
-import numpy as np
 from omegaconf import OmegaConf
 import torch
 import tyro
 
 from rlinf.projects.robotwin.utils.robotwin_eval import save_eval_result
-from rlinf.algorithms.registry import calculate_adv_and_returns, policy_loss
+from rlinf.training.rl.batch import (
+    compute_loss_mask,
+    prepare_rollout_batch,
+    process_nested_dict_for_adv,
+    process_nested_dict_for_train,
+)
+from rlinf.training.rl.metrics import (
+    append_history,
+    build_wandb_payload,
+    summarize_env_metrics,
+)
+from rlinf.training.rl.update import run_update
 from rlinf.data.embodied_io_struct import (
     ChunkStepResult,
     EmbodiedRolloutResult,
@@ -39,8 +49,6 @@ from rlinf.envs.action_utils import prepare_actions
 from rlinf.envs.robotwin.robotwin_env import RoboTwinEnv
 from rlinf.models import get_model
 from rlinf.utils.metric_utils import compute_evaluate_metrics
-from rlinf.utils.nested_dict_process import put_tensor_device, split_dict_to_chunk
-from rlinf.utils.utils import masked_mean
 
 
 CONFIG_DIR = EMBODIMENT_CONFIG_DIR
@@ -84,50 +92,6 @@ def _init_wandb_logger(args: Args, output_dir: Path) -> _WandbLogger | None:
         reinit=True,
     )
     return _WandbLogger(run)
-
-
-def process_nested_dict_for_adv(
-    nested_dict: dict[str, Any], rollout_epoch: int
-) -> dict[str, Any]:
-    ret_dict = {}
-    for key, value in nested_dict.items():
-        if isinstance(value, torch.Tensor):
-            new_value = value.reshape(rollout_epoch, -1, *value.shape[1:])
-            new_value = new_value.transpose(0, 1)
-            new_value = new_value.reshape(new_value.shape[0], -1, *new_value.shape[3:])
-            ret_dict[key] = new_value
-        elif isinstance(value, dict):
-            ret_dict[key] = process_nested_dict_for_adv(value, rollout_epoch)
-    return ret_dict
-
-
-def process_nested_dict_for_train(
-    nested_dict: dict[str, Any], shuffle_id: torch.Tensor
-) -> dict[str, Any]:
-    ret_dict = {}
-    for key, value in nested_dict.items():
-        if key in ["dones", "terminations", "truncations", "prev_values"]:
-            value = value[:-1]
-        if value is None:
-            ret_dict[key] = None
-        elif isinstance(value, torch.Tensor):
-            ret_dict[key] = value.reshape(-1, *value.shape[2:])[shuffle_id]
-        elif isinstance(value, dict):
-            ret_dict[key] = process_nested_dict_for_train(value, shuffle_id)
-    return ret_dict
-
-
-def compute_loss_mask(dones: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    _, actual_bsz, num_action_chunks = dones.shape
-    n_chunk_step = dones.shape[0] - 1
-    flattened_dones = dones.transpose(1, 2).reshape(-1, actual_bsz)
-    flattened_dones = flattened_dones[-(n_chunk_step * num_action_chunks + 1) :]
-    flattened_loss_mask = (flattened_dones.cumsum(dim=0) == 0)[:-1]
-    loss_mask = flattened_loss_mask.reshape(n_chunk_step, num_action_chunks, actual_bsz)
-    loss_mask = loss_mask.transpose(1, 2)
-    loss_mask_sum = loss_mask.sum(dim=(0, 2), keepdim=True)
-    loss_mask_sum = loss_mask_sum.expand_as(loss_mask)
-    return loss_mask, loss_mask_sum
 
 
 def build_optimizer(
@@ -369,171 +333,6 @@ def collect_rollout(
     return batch, env_metrics
 
 
-def prepare_rollout_batch(cfg, rollout_batch: dict[str, Any]):
-    rollout_batch = process_nested_dict_for_adv(
-        rollout_batch, cfg.algorithm.rollout_epoch
-    )
-    if not cfg.env.train.auto_reset and not cfg.env.train.ignore_terminations:
-        loss_mask, loss_mask_sum = compute_loss_mask(rollout_batch["dones"])
-        if cfg.algorithm.reward_type == "chunk_level":
-            loss_mask = loss_mask.any(dim=-1, keepdim=True)
-            loss_mask_sum = loss_mask_sum[..., -1:]
-        rollout_batch["loss_mask"] = loss_mask
-        rollout_batch["loss_mask_sum"] = loss_mask_sum
-
-    adv_kwargs = {
-        "task_type": cfg.runner.task_type,
-        "adv_type": cfg.algorithm.adv_type,
-        "rewards": rollout_batch["rewards"],
-        "dones": rollout_batch["dones"],
-        "values": rollout_batch.get("prev_values", None),
-        "gamma": cfg.algorithm.get("gamma", 1.0),
-        "gae_lambda": cfg.algorithm.get("gae_lambda", 1.0),
-        "group_size": cfg.algorithm.get("group_size", 1),
-        "reward_type": cfg.algorithm.reward_type,
-        "loss_mask": rollout_batch.get("loss_mask", None),
-        "loss_mask_sum": rollout_batch.get("loss_mask_sum", None),
-    }
-    rollout_batch.update(calculate_adv_and_returns(**adv_kwargs))
-    return rollout_batch
-
-
-def summarize_env_metrics(env_metrics: dict[str, list[torch.Tensor]]) -> dict[str, Any]:
-    summarized = {}
-    for key, value in env_metrics.items():
-        if value:
-            summarized[key] = _json_ready(torch.cat(value, dim=0))
-    return summarized
-
-
-def build_wandb_payload(
-    *,
-    step: int,
-    summary: dict[str, Any],
-    env_metrics_summary: dict[str, Any],
-) -> dict[str, float]:
-    payload: dict[str, float] = {
-        "rollout/reward_sum": float(summary["reward_sum"]),
-        "rollout/adv_mean": float(summary["adv_mean"]),
-        "rollout/return_mean": float(summary["return_mean"]),
-    }
-    for key, value in summary["train_metrics"].items():
-        payload[f"train/{key}"] = float(value)
-
-    for key, value in env_metrics_summary.items():
-        if isinstance(value, list):
-            if not value:
-                continue
-            payload[f"env/{key}"] = float(np.mean(value))
-        elif isinstance(value, bool):
-            payload[f"env/{key}"] = float(value)
-        else:
-            payload[f"env/{key}"] = float(value)
-
-    payload["step"] = float(step)
-    return payload
-
-
-def run_update(
-    cfg,
-    model: torch.nn.Module,
-    optimizer: torch.optim.Optimizer,
-    rollout_batch,
-    *,
-    debug_stage_logs: bool,
-):
-    rollout_size = (
-        rollout_batch["prev_logprobs"].shape[0] * rollout_batch["prev_logprobs"].shape[1]
-    )
-    shuffle_id = torch.randperm(rollout_size)
-    train_batch = process_nested_dict_for_train(rollout_batch, shuffle_id)
-
-    batch_size_per_rank = cfg.actor.global_batch_size
-    if rollout_size % batch_size_per_rank != 0:
-        raise ValueError(
-            f"rollout_size={rollout_size} is not divisible by actor.global_batch_size={batch_size_per_rank}"
-        )
-    if batch_size_per_rank % cfg.actor.micro_batch_size != 0:
-        raise ValueError(
-            "actor.global_batch_size must be divisible by actor.micro_batch_size "
-            f"but got {batch_size_per_rank} and {cfg.actor.micro_batch_size}"
-        )
-
-    device = next(model.parameters()).device
-    gradient_accumulation = batch_size_per_rank // cfg.actor.micro_batch_size
-    metrics = defaultdict(list)
-
-    model.train()
-    for _ in range(cfg.algorithm.update_epoch):
-        global_batches = split_dict_to_chunk(
-            train_batch, rollout_size // batch_size_per_rank
-        )
-        for global_batch in global_batches:
-            global_batch_size = global_batch["prev_logprobs"].shape[0]
-            micro_batches = split_dict_to_chunk(
-                global_batch, global_batch_size // cfg.actor.micro_batch_size
-            )
-            optimizer.zero_grad(set_to_none=True)
-            for batch in micro_batches:
-                batch = put_tensor_device(batch, device)
-                forward_inputs = batch["forward_inputs"]
-                log_stage("forward/backward on one micro batch", enabled=debug_stage_logs)
-                output_dict = model(
-                    forward_inputs=forward_inputs,
-                    compute_logprobs=True,
-                    compute_entropy=cfg.algorithm.entropy_bonus > 0,
-                    compute_values=cfg.algorithm.adv_type == "gae",
-                    use_cache=False,
-                )
-
-                loss_kwargs = {
-                    "loss_type": cfg.algorithm.loss_type,
-                    "logprob_type": cfg.algorithm.logprob_type,
-                    "reward_type": cfg.algorithm.reward_type,
-                    "single_action_dim": cfg.actor.model.action_dim,
-                    "logprobs": output_dict["logprobs"],
-                    "values": output_dict.get("values", None),
-                    "old_logprobs": batch["prev_logprobs"],
-                    "advantages": batch["advantages"],
-                    "returns": batch.get("returns", None),
-                    "prev_values": batch.get("prev_values", None),
-                    "clip_ratio_high": cfg.algorithm.clip_ratio_high,
-                    "clip_ratio_low": cfg.algorithm.clip_ratio_low,
-                    "value_clip": cfg.algorithm.get("value_clip", None),
-                    "huber_delta": cfg.algorithm.get("huber_delta", None),
-                    "loss_mask": batch.get("loss_mask", None),
-                    "loss_mask_sum": batch.get("loss_mask_sum", None),
-                    "max_episode_steps": cfg.env.train.max_episode_steps,
-                    "task_type": cfg.runner.task_type,
-                    "critic_warmup": False,
-                }
-                loss, metric_dict = policy_loss(**loss_kwargs)
-
-                entropy_loss = torch.tensor(0.0, device=device)
-                if cfg.algorithm.entropy_bonus > 0 and "entropy" in output_dict:
-                    entropy = output_dict["entropy"]
-                    loss_mask = batch.get("loss_mask", None)
-                    entropy_loss = masked_mean(entropy, loss_mask)
-                    loss = loss - cfg.algorithm.entropy_bonus * entropy_loss
-                metric_dict["actor/entropy_loss"] = float(entropy_loss.detach().item())
-
-                for key, value in metric_dict.items():
-                    metrics[key].append(float(value))
-
-                (loss / gradient_accumulation).backward()
-
-            grad_norm = torch.nn.utils.clip_grad_norm_(
-                [param for param in model.parameters() if param.requires_grad],
-                max_norm=cfg.actor.optim.clip_grad,
-            )
-            optimizer.step()
-            optimizer.zero_grad(set_to_none=True)
-            metrics["actor/grad_norm"].append(float(grad_norm))
-            metrics["actor/lr"].append(float(optimizer.param_groups[0]["lr"]))
-
-    return {key: float(np.mean(values)) for key, values in metrics.items()}
-
-
 def evaluate_current_policy(
     cfg,
     model: torch.nn.Module,
@@ -625,12 +424,6 @@ def evaluate_current_policy(
         "metrics": {k: _json_ready(v) for k, v in summary.items()},
         "device": str(device),
     }
-
-
-def append_history(output_dir: Path, summary: dict[str, Any]) -> None:
-    history_path = output_dir / "history.jsonl"
-    with history_path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(_json_ready(summary), ensure_ascii=False) + "\n")
 
 
 def main(args: Args | None = None) -> None:
