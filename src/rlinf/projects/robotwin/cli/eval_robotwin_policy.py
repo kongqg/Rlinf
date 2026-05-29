@@ -27,6 +27,15 @@ def parse_args() -> argparse.Namespace:
         help="Path to RoboTwin assets root, e.g. ~/RoboTwin",
     )
     parser.add_argument(
+        "--task-config",
+        choices=("demo_clean", "demo_randomized"),
+        default=None,
+        help=(
+            "Optional official RoboTwin task_config YAML to merge into "
+            "env.eval.task_config for official-compatible eval."
+        ),
+    )
+    parser.add_argument(
         "--model-path",
         required=True,
         help="OpenPI / pi0.5 checkpoint directory to evaluate.",
@@ -292,6 +301,7 @@ def main() -> None:
     result = run_robotwin_policy_eval(
         config_name=args.config_name,
         assets_path=args.assets_path,
+        task_config=args.task_config,
         model_path=args.model_path,
         ckpt_path=args.ckpt_path,
         num_envs=args.num_envs,

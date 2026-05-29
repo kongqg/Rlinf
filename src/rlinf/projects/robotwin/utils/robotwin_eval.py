@@ -26,6 +26,7 @@ from rlinf.utils.metric_utils import compute_evaluate_metrics
 
 
 CONFIG_DIR = EMBODIMENT_CONFIG_DIR
+OFFICIAL_TASK_CONFIGS = ("demo_clean", "demo_randomized")
 
 
 def ensure_robotwin_import_path() -> None:
@@ -62,6 +63,7 @@ def load_eval_cfg(
     *,
     config_name: str,
     assets_path: str,
+    task_config: str | None = None,
     model_path: str | None = None,
     num_envs: int | None = None,
     eval_rollout_epochs: int | None = None,
@@ -100,6 +102,12 @@ def load_eval_cfg(
             # RLinf SFT checkpoints store the LoRA module weights inside
             # model_state_dict/full_weights.pt, not as a PEFT adapter directory.
             cfg.actor.model.lora_path = None
+    if task_config is not None:
+        _apply_official_task_config(
+            cfg,
+            task_config=task_config,
+            assets_path=assets_path,
+        )
     if eval_seeds_path is not None:
         with open_dict(cfg.env.eval):
             cfg.env.eval.seeds_path = str(Path(eval_seeds_path).expanduser().resolve())
@@ -118,6 +126,67 @@ def load_eval_cfg(
         cfg.env.eval.task_config.render_freq = render_freq
         cfg.env.eval.task_config.eval_video_log = False
     return cfg
+
+
+def _official_robotwin_root(assets_path: str | None = None) -> Path:
+    candidates: list[Path] = []
+    env_path = os.environ.get("ROBOTWIN_PATH")
+    if env_path:
+        candidates.append(Path(env_path))
+    if assets_path:
+        candidates.append(Path(assets_path))
+    candidates.append(Path.home() / "RoboTwin")
+
+    checked: list[str] = []
+    for candidate in candidates:
+        root = candidate.expanduser().resolve()
+        checked.append(str(root))
+        if (root / "task_config").is_dir():
+            return root
+        if root.name == "assets" and (root.parent / "task_config").is_dir():
+            return root.parent
+
+    raise FileNotFoundError(
+        "Could not locate RoboTwin root containing task_config/. "
+        "Set ROBOTWIN_PATH to the RoboTwin checkout or pass assets_path pointing "
+        f"to it. Checked: {checked}"
+    )
+
+
+def _apply_official_task_config(
+    cfg,
+    *,
+    task_config: str,
+    assets_path: str | None,
+) -> None:
+    if task_config not in OFFICIAL_TASK_CONFIGS:
+        raise ValueError(
+            f"Unsupported official RoboTwin task_config={task_config!r}. "
+            f"Expected one of {OFFICIAL_TASK_CONFIGS}."
+        )
+
+    robotwin_root = _official_robotwin_root(assets_path)
+    task_config_path = robotwin_root / "task_config" / f"{task_config}.yml"
+    if not task_config_path.is_file():
+        raise FileNotFoundError(
+            "Official RoboTwin task config file does not exist: "
+            f"{task_config_path}. Check ROBOTWIN_PATH={robotwin_root}."
+        )
+
+    current_task_config = cfg.env.eval.task_config
+    preserved = {
+        key: current_task_config[key]
+        for key in ("task_name", "step_lim", "planner_backend")
+        if key in current_task_config
+    }
+    official_task_config = OmegaConf.load(task_config_path)
+    merged_task_config = OmegaConf.merge(current_task_config, official_task_config)
+    with open_dict(merged_task_config):
+        for key, value in preserved.items():
+            merged_task_config[key] = value
+
+    with open_dict(cfg.env.eval):
+        cfg.env.eval.task_config = merged_task_config
 
 
 def _load_sft_metadata(model_path: str | None) -> dict[str, Any]:
@@ -444,6 +513,7 @@ def run_robotwin_policy_eval(
     config_name: str,
     assets_path: str,
     model_path: str,
+    task_config: str | None = None,
     ckpt_path: str | None = None,
     num_envs: int | None = None,
     eval_rollout_epochs: int | None = None,
@@ -469,6 +539,7 @@ def run_robotwin_policy_eval(
     cfg = load_eval_cfg(
         config_name=config_name,
         assets_path=assets_path,
+        task_config=task_config,
         model_path=model_path,
         num_envs=num_envs,
         eval_rollout_epochs=eval_rollout_epochs,
@@ -651,6 +722,7 @@ def run_robotwin_policy_eval(
 
         result = {
             "config_name": config_name,
+            "official_task_config": task_config,
             "assets_path": env_cfg.assets_path,
             "model_path": cfg.actor.model.model_path,
             "ckpt_path": ckpt_path,
