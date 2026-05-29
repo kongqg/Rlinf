@@ -154,8 +154,12 @@ class RoboTwinV3LocalDataset(torch.utils.data.Dataset):
         meta = self.episode_meta[episode_idx]
 
         prompt = meta["tasks"][0]
-        obs_state = self.states[sample_idx]
-        action_seq = self.actions[sample_idx : sample_idx + self.action_horizon]
+        # OpenPI transforms mutate arrays in-place, so return copies rather than
+        # views into the cached parquet arrays.
+        obs_state = self.states[sample_idx].copy()
+        action_seq = self.actions[
+            sample_idx : sample_idx + self.action_horizon
+        ].copy()
         local_frame_index = int(self.frame_index[sample_idx])
 
         sample = {
