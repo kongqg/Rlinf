@@ -33,6 +33,7 @@ _CONFIGS = [
             assets=AssetsConfig(
                 assets_dir="checkpoints/torch/pi05_aloha_robotwin/assets"
             ),
+            adapt_to_pi=False,
             extra_delta_transform=True,
         ),
         pytorch_weight_path="checkpoints/torch/pi05_base",
