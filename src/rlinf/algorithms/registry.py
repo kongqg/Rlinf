@@ -12,12 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Central registries that decouple algorithm names from concrete functions.
+"""算法注册中心：把配置里的算法名映射到具体实现函数。
 
-Training code calls the unified entry points below with config-selected names
-(e.g. ``adv_type`` or ``loss_type``).  This file is therefore the thin dispatch
-layer between high-level configs and the task-specific implementations in
-``advantages.py``, ``losses.py``, and ``loss_scales.py``.
+训练代码只需要传入配置中选择的名字，比如 ``adv_type`` 或 ``loss_type``。
+本文件负责做一层很薄的分发，把高层配置连接到 ``advantages.py``、
+``losses.py`` 和 ``loss_scales.py`` 中真正的算法实现。
 """
 
 from functools import wraps
@@ -35,13 +34,13 @@ from rlinf.algorithms.utils import (
     preprocess_reasoning_advantages_inputs,
 )
 
-# Maps config-visible advantage names to callable implementations. Keeping this
-# global makes adding a new advantage estimator as simple as decorating a function.
+# 将配置里可见的 advantage 名字映射到具体函数。这样新增优势估计方法时，
+# 只需要在函数上加装饰器，不需要改 runner 里的 if/else。
 ADV_REGISTRY: dict[str, Callable] = {}
 
 
 def register_advantage(name: str):
-    """Decorator to register advantage & returns function."""
+    """注册 advantage / return 计算函数的装饰器。"""
 
     def decorator(fn):
         @wraps(fn)
@@ -55,7 +54,7 @@ def register_advantage(name: str):
 
 
 def get_adv_and_returns(name: str) -> Callable:
-    """Retrieve registered advantage function by name."""
+    """按名字取出已经注册的 advantage 函数。"""
     if name.lower() not in ADV_REGISTRY:
         raise ValueError(
             f"Advantage '{name}' not registered. Available: {list(ADV_REGISTRY.keys())}"
@@ -63,8 +62,8 @@ def get_adv_and_returns(name: str) -> Callable:
     return ADV_REGISTRY[name.lower()]
 
 
-# Policy-loss registry follows the same pattern as advantage functions so that
-# runners do not need hard-coded if/else branches for PPO, GRPO, or variants.
+# policy loss 的注册逻辑和 advantage 保持一致，runner 不需要硬编码 PPO、GRPO
+# 或其他 loss 变体的分支。
 LOSS_REGISTRY: dict[str, Callable] = {}
 
 
@@ -87,32 +86,28 @@ def get_policy_loss(name: str):
 
 
 def policy_loss(**kwargs) -> tuple[torch.Tensor, dict]:
-    """
-    Unified actor loss entry.
-    """
+    """统一的 actor loss 入口。"""
     loss_type = kwargs["loss_type"]
     loss_fn = get_policy_loss(loss_type)
 
     task_type = kwargs["task_type"]
     if task_type == "embodied":
-        # Embodied data often has action-chunk / token-level shapes, so normalize
-        # it into the tensor convention expected by the generic loss functions.
+        # 具身任务常见 action chunk / token-level 张量形状，先转换成通用
+        # loss 函数期望的形状约定。
         kwargs = preprocess_loss_inputs(**kwargs)
 
     loss, metrics_data = loss_fn(**kwargs)
 
     if task_type == "embodied":
-        # Convert embodied-specific metric tensors back to the logging convention
-        # consumed by the rest of the RLinf trainer.
+        # 将具身任务里的 tensor 指标转成训练日志系统可以直接记录的标量。
         metrics_data = postprocess_loss_metric(metrics_data)
     return loss, metrics_data
 
 
 def calculate_adv_and_returns(**kwargs) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
     """
-    Unified entry for advantage + return computation.
-    Accepts variable keyword arguments, preprocesses them, then dispatches
-    to specific algorithm via registry.
+    统一的 advantage / return 计算入口。
+    先根据任务类型做输入预处理，再根据注册表分发到具体算法。
     """
     adv_type = kwargs["adv_type"]
     fn = get_adv_and_returns(adv_type)
@@ -121,23 +116,23 @@ def calculate_adv_and_returns(**kwargs) -> tuple[torch.Tensor, Optional[torch.Te
     if task_type == "embodied":
         kwargs = preprocess_embodied_advantages_inputs(**kwargs)
         if adv_type != "gae":
-            # Non-GAE embodied algorithms receive final trajectory scores first;
-            # GAE keeps dense rewards and critic values for temporal bootstrapping.
+            # 非 GAE 的具身算法先把 dense reward 汇总成每条轨迹的最终 score；
+            # GAE 则保留逐步 reward 和 critic value，用于时序 bootstrap。
             kwargs = calculate_scores(**kwargs)
         advantages, returns = fn(**kwargs)
         res = postprocess_embodied_advantages_outputs(
             advantages=advantages, returns=returns, **kwargs
         )
     else:
-        # Reasoning tasks use sequence-level reward layouts, so they go through a
-        # different shape adapter before sharing the same algorithm registry.
+        # reasoning 任务使用 sequence-level reward 形状，需要经过另一套 shape
+        # adapter，但后面仍然复用同一套 advantage 注册表。
         kwargs = preprocess_reasoning_advantages_inputs(**kwargs)
         advantages, returns = fn(**kwargs)
         res = postprocess_reasoning_advantages_outputs(advantages, returns)
     return res
 
 
-# Optional post-processors that rescale losses, usually selected from config.
+# 可选的 loss 后处理 / 缩放函数，通常由配置选择。
 LOSS_SCALE_REGISTRY: dict[str, Callable] = {}
 
 
@@ -158,8 +153,8 @@ def get_loss_scales(names: list[str]) -> list[Callable]:
     return loss_scales
 
 
-# Tool-call parsing is optional in this minimal vendor copy; keep the registry so
-# external users get an explicit error instead of a silent missing dependency.
+# tool-call parser 在这个最小 vendor 版本里是可选能力；保留注册表可以让调用方
+# 得到明确错误，而不是因为缺少依赖而静默失败。
 TOOLCALL_PARSER_REGISTRY: dict[str, Callable] = {}
 
 
