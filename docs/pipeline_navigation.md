@@ -1,499 +1,466 @@
-# RoboTwin Phone Pipeline 导航图
+# RoboTwin / pi0.5 Pipeline Navigation
 
-这份文档只讲当前主线：
+这份文档对应当前 `main` 分支的真实代码结构。当前仓库的主线不是 `bentele` 包，也不是旧的 ManiSkill smoke path，而是：
+
+```text
+scripts/*
+  -> src/rlinf/projects/robotwin/cli/*
+  -> src/rlinf/projects/robotwin/adapters/*
+  -> src/rlinf/training/*
+  -> src/rlinf/models/envs/algorithms/*
+```
+
+当前最重要的任务链路是：
 
 - 任务：`RoboTwin place_phone_stand`
-- 模型：`pi0.5 / openpi`
-- 算法：`PPO`
+- 模型：`pi0.5 / OpenPI`
+- 训练一：VLA SFT / LoRA SFT
+- 训练二：从 SFT checkpoint 继续做本地 RL fine-tune
+- 评估：单独 eval checkpoint 或训练中周期 eval
 
-目标不是把每一步讲得很细，而是回答两个问题：
+README 里的流程图对应：
 
-1. 整个 pipeline 大概怎么流。
-2. 如果想看某块细节，应该去哪个文件、哪个函数。
-
----
-
-## 1. 一句话总览
-
-主线是：
-
-`Hydra 配置 -> bentele 入口 -> rlinf bridge -> runner -> env/rollout/actor worker -> env 产 obs -> rollout 用 pi0.5 出 action -> env 执行动作产 trajectory -> actor 算 PPO update -> 新权重同步回 rollout`
-
-如果你只想先记住最重要的几个文件：
-
-- 训练入口：
-  `src/rlinf/projects/robotwin/cli/train_embodied.py`
-- 配置入口：
-  `src/rlinf/projects/robotwin/configs/embodiment/robotwin_place_phone_stand_ppo_openpi_pi05.yaml`
-- bridge：
-  `src/rlinf/projects/robotwin/integration/rlinf_embodied.py`
-- 主循环：
-  `src/rlinf/runners/embodied_runner.py`
-- 环境：
-  `src/rlinf/envs/robotwin/robotwin_env.py`
-- rollout 推理：
-  `src/rlinf/workers/rollout/hf/huggingface_worker.py`
-- pi0.5 policy：
-  `src/rlinf/models/embodiment/openpi/openpi_action_model.py`
-- actor 训练：
-  `src/rlinf/workers/actor/fsdp_actor_worker.py`
+```text
+docs/rlinf_finetune_pipeline.svg
+```
 
 ---
 
-## 2. 从哪里开始
+## 1. 先看哪些文件
 
-### 2.1 配置从哪进来
+如果你只想快速理解当前 pipeline，按这个顺序看：
 
-先看：
-
-- `src/rlinf/projects/robotwin/configs/embodiment/robotwin_place_phone_stand_ppo_openpi_pi05.yaml`
-- `src/rlinf/projects/robotwin/configs/embodiment/env/robotwin_place_phone_stand.yaml`
-- `src/rlinf/projects/robotwin/configs/embodiment/model/pi0_5.yaml`
-
-这里主要决定：
-
-- 任务名
-- env 参数
-- pi0.5 模型参数
-- PPO 超参数
-- rollout / actor / eval 设置
-
-如果你想知道“这次跑的到底是什么任务、多少 env、什么 checkpoint、什么 PPO 参数”，先看这几份。
-
-### 2.2 训练从哪启动
-
-看：
-
-- `src/rlinf/projects/robotwin/cli/train_embodied.py`
-  - `main(...)`
-
-它做的事很简单：
-
-- Hydra 读配置
-- 把配置交给 bridge
-
-如果你想知道“程序是从哪里起的”，就从这里开始。
+| 目的 | 文件 |
+|---|---|
+| 看整体使用方式 | `README.md` |
+| 看流程图 | `docs/rlinf_finetune_pipeline.svg` |
+| 跑 full VLA SFT | `scripts/train_robotwin_vla.py` |
+| 跑 LoRA SFT | `scripts/train_robotwin_vla_lora.py` |
+| 跑本地 RL fine-tune | `scripts/train_robotwin_local_rl.py` |
+| 单独评估 checkpoint | `scripts/eval_robotwin_policy.py` |
+| 计算 norm stats | `scripts/compute_robotwin_norm_stats.py` |
+| RoboTwin 项目适配层 | `src/rlinf/projects/robotwin/adapters/` |
+| 通用 SFT 训练循环 | `src/rlinf/training/sft/trainer.py` |
+| 通用 RL batch/update 工具 | `src/rlinf/training/rl/` |
+| PPO / GAE / loss 逻辑 | `src/rlinf/algorithms/` |
+| RoboTwin env wrapper | `src/rlinf/envs/robotwin/robotwin_env.py` |
+| OpenPI/pi0.5 action model | `src/rlinf/models/embodiment/openpi/openpi_action_model.py` |
 
 ---
 
-## 3. 配置怎么变成 worker 和 runner
+## 2. 当前目录怎么分层
 
-看：
+当前仓库大体分成三层：
 
-- `src/rlinf/projects/robotwin/integration/rlinf_embodied.py`
-  - `run_sync_embodied_training(...)`
-  - `_create_sync_actor_group(...)`
+```text
+src/rlinf/projects/robotwin/
+  项目层：RoboTwin 的 CLI、adapter、config、dataset、eval、runtime glue。
 
-这一层的职责是：
+src/rlinf/
+  RLinf 引擎层：algorithms、training、envs、models、workers、scheduler、utils。
 
-- 校验配置
-- 创建 cluster / placement
-- 创建 actor group
-- 创建 rollout group
-- 创建 env group
-- 创建 runner
+src/openpi/ + src/openpi_client/
+  vendored OpenPI 层：pi0.5 模型、transform、checkpoint、client helper。
+```
 
-如果你想知道“哪些 worker 被建起来了、同步训练到底起了哪些角色”，看这个文件。
+也就是说：
 
-再往下看：
-
-- `src/rlinf/runners/embodied_runner.py`
-  - `__init__(...)`
-  - `init_workers(...)`
-  - `run(...)`
-  - `update_rollout_weights(...)`
-  - `evaluate(...)`
-
-这里是最核心的主循环。
-
-如果你想知道：
-
-- 每一轮什么时候 rollout
-- 什么时候 actor 更新
-- 什么时候 eval
-- 什么时候同步权重
-
-看 `EmbodiedRunner.run(...)`。
+- `projects/robotwin` 负责“这个项目怎么接进来”。
+- `training` 和 `algorithms` 负责“训练循环和算法怎么算”。
+- `models/embodiment/openpi` 负责“OpenPI/pi0.5 怎么包装成 RLinf policy”。
+- `envs/robotwin` 负责“RoboTwin 环境怎么 reset/step/chunk_step”。
 
 ---
 
-## 4. 环境这边怎么流
+## 3. VLA SFT / LoRA SFT 怎么流
 
-### 4.1 真正的 RoboTwin 环境在哪里
+### 3.1 入口
 
-看：
+```text
+scripts/train_robotwin_vla.py
+scripts/train_robotwin_vla_lora.py
+```
 
-- `src/rlinf/envs/robotwin/robotwin_env.py`
-  - `__init__(...)`
-  - `_init_env(...)`
-  - `reset(...)`
-  - `step(...)`
-  - `chunk_step(...)`
-  - `_extract_obs_image(...)`
+这两个脚本本身很薄，只负责把 `src/` 放进 `PYTHONPATH`，然后调用：
 
-这里负责：
+```text
+src/rlinf/projects/robotwin/cli/train_robotwin_vla.py
+src/rlinf/projects/robotwin/cli/train_robotwin_vla_lora.py
+```
 
-- 起 RoboTwin `VectorEnv`
-- `reset`
-- `step`
-- 把 RoboTwin 原始观测抽成：
-  - `main_images`
-  - `wrist_images`
-  - `states`
-  - `task_descriptions`
+### 3.2 CLI 层
 
-如果你想知道：
+SFT CLI 会做：
 
-- obs 长什么样
-- action 怎么喂回环境
-- reward / termination / truncation 怎么来
+```text
+tyro.cli(Args)
+run_sft_training(args, RobotwinSFTTaskSpec())
+```
 
-看这个文件。
+LoRA CLI 继承同一个 `Args`，但默认：
 
-### 4.2 env worker 怎么和 rollout/actor 通信
+```text
+is_lora = True
+lora_rank = 32
+wandb_tags = ("lora",)
+```
 
-看：
+对应文件：
 
-- `src/rlinf/workers/env/env_worker.py`
-  - `interact(...)`
-  - `_run_interact_once(...)`
-  - `send_env_batch(...)`
-  - `recv_rollout_results(...)`
-  - `env_interact_step(...)`
-  - `evaluate(...)`
-  - `env_evaluate_step(...)`
+```text
+src/rlinf/projects/robotwin/cli/train_robotwin_vla.py
+src/rlinf/projects/robotwin/cli/train_robotwin_vla_lora.py
+src/rlinf/projects/robotwin/training/sft/args.py
+```
 
-这是“环境 worker 层”，不是单纯环境本体。
+### 3.3 项目 adapter 层
 
-这里负责：
+核心文件：
 
-- 把 obs 发给 rollout
-- 收 rollout 回来的 action
-- 调 env.step
-- 攒成 trajectory
-- eval 时单独跑评测闭环
+```text
+src/rlinf/projects/robotwin/adapters/sft_task.py
+src/rlinf/projects/robotwin/adapters/_sft_impl.py
+```
 
-如果你想知道：
+`RobotwinSFTTaskSpec` 把 RoboTwin 项目接到通用 SFT 训练器里。它主要提供这些 hook：
 
-- env 和 rollout 怎么接
-- trajectory 是怎么攒起来的
-- eval 时环境怎么跑
+```text
+init_runtime
+build_dataloader
+build_model
+build_optimizer
+move_batch_to_device
+forward_loss
+save_checkpoint
+run_eval
+```
 
-看这个文件。
+真正的细节放在 `_sft_impl.py`：
 
----
+- `_build_loader(...)`：读取 RoboTwin V3 本地数据集，接 OpenPI dataconfig 和 transform。
+- `_build_model(...)`：加载 pi0.5/OpenPI checkpoint，必要时应用 LoRA。
+- `_apply_openpi_lora(...)`：把 LoRA 注入 PaliGemma VLM 子树。
+- `_save_checkpoint(...)`：保存训练产物。
+- `_run_periodic_eval(...)`：训练中周期评估。
 
-## 5. rollout 这边怎么流
+### 3.4 通用 SFT trainer
 
-看：
+核心文件：
 
-- `src/rlinf/workers/rollout/hf/huggingface_worker.py`
-  - `init_worker(...)`
-  - `setup_sample_params(...)`
-  - `generate(...)`
-  - `evaluate(...)`
-  - `recv_env_output(...)`
-  - `predict(...)`
-  - `send_chunk_actions(...)`
-  - `send_rollout_result(...)`
+```text
+src/rlinf/training/sft/trainer.py
+```
 
-这里的 rollout worker 干的事是：
+主循环大概是：
 
-- 收 env obs
-- 调 policy 前向
-- 产出 action / logprob / value
-- 发回 env
+```text
+init runtime
+-> init distributed
+-> build dataloader
+-> build model
+-> build optimizer
+-> for step in train_steps:
+     batch = next(data_loader)
+     loss = task.forward_loss(...)
+     backward
+     optimizer step / grad accumulation
+     log / save / eval
+```
 
-如果你想知道：
+SFT 的核心目标可以理解成行为克隆：
 
-- rollout 到底什么时候前向
-- 训练模式和 eval 模式的采样参数怎么区别
-- `temperature_train / temperature_eval` 用在什么地方
-
-看这个文件。
-
----
-
-## 6. pi0.5 / openpi 在哪里看
-
-### 6.1 模型是怎么被加载的
-
-看：
-
-- `src/rlinf/models/embodiment/openpi/__init__.py`
-  - `get_model(...)`
-
-它负责：
-
-- 读 `model_path`
-- 加载 `model.safetensors` 或 checkpoint
-- 加载 `norm_stats`
-- 给模型挂 transform wrapper
-
-如果你想知道：
-
-- 模型 checkpoint 怎么进来
-- norm stats 怎么加载
-
-先看这里。
-
-### 6.2 RoboTwin/ALOHA 数据适配在哪里
-
-看：
-
-- `src/rlinf/models/embodiment/openpi/dataconfig/__init__.py`
-  - `get_openpi_config(...)`
-- `src/rlinf/models/embodiment/openpi/dataconfig/robotwin_aloha_dataconfig.py`
-  - `LeRobotAlohaDataConfig.create(...)`
-
-这一层负责把：
-
-- RoboTwin / ALOHA 数据格式
-
-适配成：
-
-- pi0.5/openpi 想吃的格式
-
-如果你想知道：
-
-- 为什么 state 从 14 维变成模型内部 32 维
-- 为什么要做 ALOHA 输入/输出适配
-- quantile norm / z-score 配置从哪进来
-
-看这两个文件。
-
-### 6.3 policy 真正前向和出动作在哪里
-
-看：
-
-- `src/rlinf/models/embodiment/openpi/openpi_action_model.py`
-  - `obs_processor(...)`
-  - `input_transform(...)`
-  - `precision_processor(...)`
-  - `predict_action_batch(...)`
-  - `sample_actions(...)`
-
-这是最关键的 policy 包装层。
-
-这里负责：
-
-- env obs -> policy obs
-- transform / normalize
-- Observation 构造
-- pi0.5 前向
-- action chunk 输出
-- `prev_logprobs`
-- `prev_values`
-- `forward_inputs`
-
-如果你想知道：
-
-- obs 是怎么变成模型输入的
-- action 是怎么出来的
-- PPO 后面为什么还能重算 logprob/value
-
-看这个文件。
-
-### 6.4 更底层的 pi0.5 PyTorch 主体
-
-看：
-
-- `src/openpi/models_pytorch/pi0_pytorch.py`
-
-如果你想看：
-
-- pi0.5 网络主体
-- flow/diffusion 样式动作采样
-- value 头前后的内部细节
-
-再往下进这个文件。
+```text
+L_SFT = mean(loss(model(observation), target_actions))
+```
 
 ---
 
-## 7. actor 训练这边怎么流
+## 4. 本地 RL fine-tune 怎么流
 
-看：
+### 4.1 入口
 
-- `src/rlinf/workers/actor/fsdp_actor_worker.py`
-  - `init_worker(...)`
-  - `recv_rollout_trajectories(...)`
-  - `_process_received_rollout_batch(...)`
-  - `compute_advantages_and_returns(...)`
-  - `run_training(...)`
-  - `sync_model_to_rollout(...)`
+```text
+scripts/train_robotwin_local_rl.py
+```
 
-这是训练端。
+薄入口继续调用：
 
-它负责：
+```text
+src/rlinf/projects/robotwin/cli/train_robotwin_local_rl.py
+```
 
-- 收 env 发来的 trajectory
-- 整成 rollout batch
-- 算 advantage / return
-- 用 `forward_inputs` 重新前向
-- 算 PPO loss
-- backward / optimizer step
-- 把新权重发给 rollout
+CLI 会解析参数，然后走：
 
-如果你想知道：
+```text
+run_rl_training(args, RobotwinRLTaskSpec())
+```
 
-- PPO update 真正在哪里发生
-- `prev_values` / `forward_inputs` 后面怎么用
-- 为什么训练完要同步权重给 rollout
+对应文件：
 
-看这个文件。
+```text
+src/rlinf/projects/robotwin/cli/train_robotwin_local_rl.py
+src/rlinf/projects/robotwin/adapters/rl_task.py
+src/rlinf/training/rl/runner.py
+```
 
----
+### 4.2 项目 RL 实现
 
-## 8. 训练数据容器在哪里看
+核心文件：
 
-看：
+```text
+src/rlinf/projects/robotwin/adapters/_rl_impl.py
+```
 
-- `src/rlinf/data/embodied_io_struct.py`
-  - `EnvOutput`
-  - `RolloutResult`
-  - `Trajectory`
-  - `EmbodiedRolloutResult`
+本地 RL 不是走完整多 worker 分布式链路，而是一个轻量本地闭环：
 
-这里主要回答：
+```text
+compose_cfg(args)
+-> get_model(cfg.actor.model)
+-> RoboTwinEnv(...)
+-> for step in total_steps:
+     rollout_batch, env_metrics = collect_rollout(...)
+     rollout_batch = prepare_rollout_batch(...)
+     train_metrics = run_update(...)
+     log / save / eval
+```
 
-- env 发出去的结构是什么
-- rollout 回来的结构是什么
-- 最后 actor 收到的 trajectory 长什么样
+### 4.3 rollout 收集
 
-如果你想知道：
+核心函数：
 
-- `prev_values`
-- `forward_inputs`
-- `terminations`
-- `truncations`
-- `dones`
+```text
+collect_rollout(...)
+env_interact_step(...)
+```
 
-这些字段具体在哪一层出现，就看这个文件。
+它做的事情是：
 
----
+1. reset RoboTwin 环境。
+2. 用当前 policy 预测 action chunk。
+3. 记录 `prev_logprobs`、`prev_values`、`forward_inputs`。
+4. 把 action chunk 送进环境。
+5. 收集 reward、done、termination、truncation。
+6. 结尾额外算一次 bootstrap value。
+7. 转成训练 batch。
 
-## 9. advantage / return / PPO loss 在哪里看
+相关文件：
 
-看：
+```text
+src/rlinf/projects/robotwin/adapters/_rl_impl.py
+src/rlinf/data/embodied_io_struct.py
+src/rlinf/envs/action_utils.py
+src/rlinf/envs/robotwin/robotwin_env.py
+```
 
-- `src/rlinf/algorithms/advantages.py`
-- `src/rlinf/algorithms/registry.py`
-- `src/rlinf/algorithms/utils.py`
+### 4.4 advantage / return
 
-如果你想知道：
+核心文件：
 
-- GAE 怎么算
-- return 怎么算
-- advantage reshape/对齐是怎么做的
+```text
+src/rlinf/training/rl/batch.py
+src/rlinf/algorithms/registry.py
+src/rlinf/algorithms/advantages.py
+src/rlinf/algorithms/utils.py
+```
 
-看这些。
+关键入口：
 
-PPO loss 细节再看：
+```text
+prepare_rollout_batch(...)
+calculate_adv_and_returns(...)
+```
 
-- `src/rlinf/workers/actor/fsdp_actor_worker.py`
+它会做：
 
----
+- 重新整理 rollout epoch 维度。
+- 根据 `dones` 构造 `loss_mask`。
+- 调 registry 分发到 GAE / GRPO / raw 等 advantage 实现。
+- 对 embodied batch 做 shape adapter。
 
-## 10. 评测应该看哪里
+常见 GAE 逻辑：
 
-### 10.1 独立 policy 评测入口
+```text
+delta_t = r_t + gamma * V(s_{t+1}) - V(s_t)
+A_t = sum_l (gamma * lambda)^l * delta_{t+l}
+```
 
-看：
+### 4.5 policy update
 
-- `scripts/eval_robotwin_policy.py`
+核心文件：
 
-这是现在最适合你的 eval 入口。它不走训练 runner，直接：
+```text
+src/rlinf/training/rl/update.py
+src/rlinf/algorithms/losses.py
+src/rlinf/training/rl/optim.py
+```
 
-- 起 env
-- 起 policy
-- 跑 `reset -> predict_action_batch -> env.step`
-- 聚合 eval metrics
+关键入口：
 
-如果你想做：
+```text
+run_update(...)
+policy_loss(...)
+```
 
-- pretrain model eval
-- VLA-only checkpoint eval
-- RL fine-tuned checkpoint eval
+它会做：
 
-先看这个脚本。
+- shuffle rollout batch。
+- 切 global batch / micro batch。
+- 用 `forward_inputs` 重新前向，计算当前策略 logprob/value。
+- 用旧 logprob 和当前 logprob 算 PPO ratio。
+- 计算 clipped policy loss / value loss / entropy bonus。
+- backward、gradient accumulation、clip grad、optimizer step。
 
-## 11. 想看什么，就去哪里
+PPO clipped objective 的核心形态：
 
-### 想看“整个训练从哪里开始”
-
-看：
-
-- `src/rlinf/projects/robotwin/cli/train_embodied.py`
-- `src/rlinf/projects/robotwin/integration/rlinf_embodied.py`
-- `src/rlinf/runners/embodied_runner.py`
-
-### 想看“环境 obs 是怎么出来的”
-
-看：
-
-- `src/rlinf/envs/robotwin/robotwin_env.py`
-
-### 想看“obs 怎么变成 pi0.5 输入”
-
-看：
-
-- `src/rlinf/models/embodiment/openpi/openpi_action_model.py`
-  - `obs_processor`
-  - `input_transform`
-  - `precision_processor`
-
-### 想看“action 怎么出来的”
-
-看：
-
-- `src/rlinf/models/embodiment/openpi/openpi_action_model.py`
-  - `predict_action_batch`
-  - `sample_actions`
-
-### 想看“为什么有 prev_values / forward_inputs”
-
-看：
-
-- `src/rlinf/models/embodiment/openpi/openpi_action_model.py`
-- `src/rlinf/data/embodied_io_struct.py`
-- `src/rlinf/workers/actor/fsdp_actor_worker.py`
-
-### 想看“PPO 是怎么更新的”
-
-看：
-
-- `src/rlinf/workers/actor/fsdp_actor_worker.py`
-  - `compute_advantages_and_returns`
-  - `run_training`
-
-### 想看“权重为什么同步给 rollout”
-
-看：
-
-- `src/rlinf/runners/embodied_runner.py`
-  - `update_rollout_weights`
-- `src/rlinf/workers/actor/fsdp_actor_worker.py`
-  - `sync_model_to_rollout`
-
-### 想看“纯评测怎么跑”
-
-看：
-
-- `scripts/eval_robotwin_policy.py`
+```text
+r_t = exp(log pi_theta(a_t|s_t) - log pi_old(a_t|s_t))
+L_clip = E[min(r_t A_t, clip(r_t, 1-eps, 1+eps) A_t)]
+```
 
 ---
 
-## 12. 当前最推荐的阅读顺序
+## 5. eval 怎么流
 
-如果你第一次读这条链，建议顺序就是：
+### 5.1 单独 eval
 
-1. `src/rlinf/projects/robotwin/configs/embodiment/robotwin_place_phone_stand_ppo_openpi_pi05.yaml`
-2. `src/rlinf/projects/robotwin/cli/train_embodied.py`
-3. `src/rlinf/projects/robotwin/integration/rlinf_embodied.py`
-4. `src/rlinf/runners/embodied_runner.py`
-5. `src/rlinf/workers/env/env_worker.py`
-6. `src/rlinf/workers/rollout/hf/huggingface_worker.py`
-7. `src/rlinf/models/embodiment/openpi/openpi_action_model.py`
-8. `src/rlinf/workers/actor/fsdp_actor_worker.py`
+入口：
 
-这 8 个文件基本就能把主线串起来。
+```text
+scripts/eval_robotwin_policy.py
+src/rlinf/projects/robotwin/cli/eval_robotwin_policy.py
+```
+
+主要逻辑：
+
+```text
+src/rlinf/projects/robotwin/robotwin/eval.py
+src/rlinf/projects/robotwin/utils/robotwin_eval.py
+```
+
+它会加载 checkpoint，创建 RoboTwin env，执行 policy rollout，最后保存 JSON 结果。
+
+### 5.2 SFT/RL 训练中 eval
+
+SFT 中周期 eval：
+
+```text
+src/rlinf/projects/robotwin/adapters/sft_task.py::run_eval
+src/rlinf/projects/robotwin/adapters/_sft_impl.py::_run_periodic_eval
+```
+
+本地 RL 中周期 eval：
+
+```text
+src/rlinf/projects/robotwin/adapters/_rl_impl.py::evaluate_current_policy
+```
+
+---
+
+## 6. norm stats 怎么流
+
+入口：
+
+```text
+scripts/compute_robotwin_norm_stats.py
+src/rlinf/projects/robotwin/cli/compute_robotwin_norm_stats.py
+```
+
+作用：
+
+- 从 RoboTwin dataset 统计 state/action normalization stats。
+- 写入 pi0.5/OpenPI checkpoint 目录。
+- 后续 SFT / eval / RL 都会通过 OpenPI dataconfig 和 checkpoint loader 使用这些 stats。
+
+相关文件：
+
+```text
+src/rlinf/projects/robotwin/robotwin/norm_stats.py
+src/rlinf/models/embodiment/openpi/dataconfig/robotwin_aloha_dataconfig.py
+src/openpi/shared/normalize.py
+```
+
+---
+
+## 7. 最容易读错的地方
+
+### 7.1 `src/rlinf/projects/robotwin/training/sft/` 不是训练主循环
+
+这里主要是兼容旧 import 的 wrapper / args。真正通用 SFT 主循环在：
+
+```text
+src/rlinf/training/sft/trainer.py
+```
+
+项目细节在：
+
+```text
+src/rlinf/projects/robotwin/adapters/sft_task.py
+src/rlinf/projects/robotwin/adapters/_sft_impl.py
+```
+
+### 7.2 `training/local_rl/` 也不是核心算法实现
+
+本地 RL 的项目入口在：
+
+```text
+src/rlinf/projects/robotwin/adapters/_rl_impl.py
+```
+
+通用 batch/update/optimizer 在：
+
+```text
+src/rlinf/training/rl/
+```
+
+算法 loss / advantage 在：
+
+```text
+src/rlinf/algorithms/
+```
+
+### 7.3 `scripts/` 是用户入口，不是全部逻辑
+
+`scripts/*.py` 通常只是薄入口。看完脚本后，要继续跳到：
+
+```text
+src/rlinf/projects/robotwin/cli/
+src/rlinf/projects/robotwin/adapters/
+```
+
+---
+
+## 8. 建议读代码路线
+
+第一次读代码，按这个路线走：
+
+```text
+README.md
+-> docs/rlinf_finetune_pipeline.svg
+-> scripts/train_robotwin_vla.py
+-> src/rlinf/projects/robotwin/cli/train_robotwin_vla.py
+-> src/rlinf/projects/robotwin/adapters/sft_task.py
+-> src/rlinf/projects/robotwin/adapters/_sft_impl.py
+-> src/rlinf/training/sft/trainer.py
+```
+
+然后看 RL：
+
+```text
+scripts/train_robotwin_local_rl.py
+-> src/rlinf/projects/robotwin/cli/train_robotwin_local_rl.py
+-> src/rlinf/projects/robotwin/adapters/rl_task.py
+-> src/rlinf/projects/robotwin/adapters/_rl_impl.py
+-> src/rlinf/training/rl/batch.py
+-> src/rlinf/training/rl/update.py
+-> src/rlinf/algorithms/losses.py
+-> src/rlinf/algorithms/advantages.py
+```
+
+最后补环境和模型：
+
+```text
+src/rlinf/envs/robotwin/robotwin_env.py
+src/rlinf/envs/action_utils.py
+src/rlinf/models/embodiment/openpi/openpi_action_model.py
+src/openpi/models_pytorch/pi0_pytorch.py
+```
