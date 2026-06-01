@@ -1,6 +1,8 @@
 # RoboTwin / pi0.5 Pipeline Navigation
 
-这份文档对应当前 `main` 分支的真实代码结构。当前仓库的主线不是 `bentele` 包，也不是旧的 ManiSkill smoke path，而是：
+这份文档用于说明当前仓库的 RoboTwin / pi0.5 训练主线，主要包括 VLA SFT、LoRA SFT、本地 RL fine-tune 和 checkpoint eval。
+
+主代码链路：
 
 ```text
 scripts/*
@@ -211,7 +213,7 @@ src/rlinf/training/rl/runner.py
 src/rlinf/projects/robotwin/adapters/_rl_impl.py
 ```
 
-本地 RL 不是走完整多 worker 分布式链路，而是一个轻量本地闭环：
+本地 RL 使用轻量本地闭环：
 
 ```text
 compose_cfg(args)
@@ -381,11 +383,11 @@ src/openpi/shared/normalize.py
 
 ---
 
-## 7. 最容易读错的地方
+## 7. 容易混淆的地方
 
-### 7.1 `src/rlinf/projects/robotwin/training/sft/` 不是训练主循环
+### 7.1 `src/rlinf/projects/robotwin/training/sft/` 的职责
 
-这里主要是兼容旧 import 的 wrapper / args。真正通用 SFT 主循环在：
+这里主要保存 SFT 参数定义和兼容 wrapper。真正通用 SFT 主循环在：
 
 ```text
 src/rlinf/training/sft/trainer.py
@@ -398,7 +400,7 @@ src/rlinf/projects/robotwin/adapters/sft_task.py
 src/rlinf/projects/robotwin/adapters/_sft_impl.py
 ```
 
-### 7.2 `training/local_rl/` 也不是核心算法实现
+### 7.2 `training/local_rl/` 的职责
 
 本地 RL 的项目入口在：
 
