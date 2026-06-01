@@ -74,6 +74,10 @@ pip install -r requirements-realworld.txt
 pip install -r requirements-maniskill.txt
 ```
 
+## Fine-tune Pipeline
+
+![RLinf / RoboTwin Fine-tune Pipeline](docs/rlinf_finetune_pipeline.svg)
+
 ## 基本使用示例
 
 先按本地实际路径设置这些变量：
