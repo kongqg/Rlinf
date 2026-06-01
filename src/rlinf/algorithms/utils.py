@@ -12,12 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Tensor-shape adapters shared by RL losses and advantage estimators.
+
+Most algorithm implementations expect a compact mathematical layout such as
+``[time, batch]`` or ``[batch, chunk]``.  Real embodied and reasoning batches use
+slightly different conventions, so this module centralizes the reshape,
+transpose, score aggregation, and logging post-processing steps.
+"""
+
 from typing import Optional
 
 import torch
 
 
 def huber_loss(error: torch.Tensor, delta: float) -> torch.Tensor:
+    """Huber penalty used by value losses to be quadratic near zero and linear for outliers."""
     return torch.where(
         error.abs() < delta, 0.5 * error**2, delta * (error.abs() - 0.5 * delta)
     )
@@ -39,6 +48,7 @@ def kl_penalty(
 
     """
     if kl_penalty in ("kl", "k1"):
+        # k1 is the signed log-ratio estimator; callers decide how to reduce it.
         return logprob - ref_logprob
 
     if kl_penalty == "abs":
@@ -51,7 +61,8 @@ def kl_penalty(
     # # URL http://joschu.net/blog/kl-approx.html.
     if kl_penalty in ("low_var_kl", "k3"):
         kl = ref_logprob - logprob
-        # For numerical stability
+        # Clamp the exponent input so a very bad policy/reference mismatch does
+        # not create inf values before the trainer can clip or log the update.
         kl = torch.clamp(kl, min=-20, max=20)
         ratio = torch.exp(kl)
         kld = (ratio - kl - 1).contiguous()
@@ -77,7 +88,9 @@ def preprocess_embodied_advantages_inputs(
     Unify names & formats, align with math interfaces.
     """
     if kwargs["reward_type"] == "chunk_level":
-        # TODO: need check
+        # Chunk-level rewards collapse the action dimension before temporal
+        # advantage computation, because downstream estimators work on one scalar
+        # reward per environment step.
         # rewards, dones, loss_mask, loss_mask_sum: [n_chunk_steps, bsz, num_action_chunks] -> [n_chunk_steps, bsz, 1]
         rewards = rewards.sum(dim=-1, keepdim=True)
         dones = dones.max(dim=-1, keepdim=True)[0]
@@ -113,6 +126,8 @@ def preprocess_embodied_advantages_inputs(
     dones = flattened_dones_full[-(n_steps + 1) :]
 
     if kwargs["adv_type"] == "gae":
+        # GAE needs V_t and V_{t+1}; keep the extra bootstrap value after
+        # flattening the chunked temporal layout.
         flattened_values_full = values.transpose(1, 2).reshape(
             (num_chunk + 1) * chunk_size, bsz
         )
@@ -136,8 +151,11 @@ def calculate_scores(
     dones: torch.Tensor,
     **kwargs,
 ) -> dict:
+    """Accumulate discounted-free episodic scores for group-relative methods."""
     scores = torch.zeros(kwargs["batch_size"])
     for step in reversed(range(kwargs["n_steps"])):
+        # Reset the running suffix sum whenever the following timestep starts a
+        # new episode, then add the reward at the current timestep.
         scores = scores * ~dones[step + 1]
         scores += rewards[step]
     scores = scores.reshape(-1, kwargs["group_size"])
@@ -164,6 +182,7 @@ def postprocess_embodied_advantages_outputs(
     """
     res = {}
 
+    # Reverse preprocess_embodied_advantages_inputs: [T, B] -> [chunk, B, chunk_size].
     advantages = advantages.reshape(num_chunk, chunk_size, -1).transpose(1, 2)
     res.update({"advantages": advantages})
 
@@ -190,6 +209,8 @@ def preprocess_reasoning_advantages_inputs(
     assert rewards.ndim == 1, f"Unsupported reward shape {rewards.shape}"
 
     if kwargs["adv_type"] == "gae":
+        # Sparse final rewards are expanded to token time so GAE can share the
+        # same [seq_len, batch] interface as embodied environments.
         expanded_rewards = torch.zeros(
             (seq_len, bsz), dtype=rewards.dtype, device=rewards.device
         )
@@ -205,6 +226,8 @@ def preprocess_reasoning_advantages_inputs(
         )
 
     elif kwargs["adv_type"] == "grpo_dynamic":
+        # Dynamic GRPO keeps one reward per flattened turn/sequence, then the
+        # estimator uses idx_to_traj to recover trajectory/question groupings.
         grouped_rewards = (
             rewards.reshape(-1, kwargs["num_sequence"]).transpose(0, 1).contiguous()
         )
@@ -292,7 +315,10 @@ def preprocess_loss_inputs(
     versions: Optional[torch.Tensor] = None,
     **kwargs,
 ) -> dict:
+    """Reshape embodied actor-loss tensors to the configured log-prob granularity."""
     if reward_type == "chunk_level":
+        # Chunk-level reward mode treats the whole action chunk as one training
+        # example, so auxiliary tensors must be flattened to match logprob layout.
         advantages = advantages.flatten()
         if loss_mask is not None:
             loss_mask = loss_mask.flatten()
@@ -308,6 +334,8 @@ def preprocess_loss_inputs(
     bsz = logprobs.shape[0]
     proximal_logprobs = kwargs.get("proximal_logprobs", None)
     if logprob_type == "token_level":
+        # Keep one log-prob per action dimension; PPO clipping is applied at the
+        # finest granularity.
         # logprobs, old_logprobs: [bsz, num_action_chunks, action_dim] -> [bsz, num_action_chunks, action_dim]
         logprobs = logprobs.reshape(bsz, -1, single_action_dim)
         old_logprobs = old_logprobs.reshape(bsz, -1, single_action_dim)
@@ -322,6 +350,7 @@ def preprocess_loss_inputs(
             loss_mask_sum = loss_mask_sum.unsqueeze(-1)
 
     elif logprob_type == "action_level":
+        # Sum across action dimensions so each chunk step has one joint-action log-prob.
         # logprobs, old_logprobs: [bsz, num_action_chunks, action_dim] -> [bsz, num_action_chunks]
         logprobs = logprobs.reshape(bsz, -1, single_action_dim).sum(dim=-1)
         old_logprobs = old_logprobs.reshape(bsz, -1, single_action_dim).sum(dim=-1)
@@ -333,6 +362,8 @@ def preprocess_loss_inputs(
             versions = versions.reshape(bsz, -1, single_action_dim)[..., 0]
 
     elif logprob_type == "chunk_level":
+        # Sum all action dimensions and chunk steps so one trajectory chunk has
+        # one scalar log-prob for PPO/GRPO ratio computation.
         # logprobs, old_logprobs: [bsz, num_action_chunks, action_dim] -> [bsz]
         logprobs = logprobs.reshape(bsz, -1, single_action_dim).sum(dim=[1, 2])
         old_logprobs = old_logprobs.reshape(bsz, -1, single_action_dim).sum(dim=[1, 2])
@@ -344,6 +375,7 @@ def preprocess_loss_inputs(
             versions = versions.reshape(bsz, -1, single_action_dim)[:, 0, 0]
 
     target_shape = logprobs.shape
+    # Broadcast scalar/step-level annotations to the final loss tensor shape.
     advantages = expand_to_target_dim(advantages, target_shape)
     loss_mask = expand_to_target_dim(loss_mask, target_shape)
     loss_mask_sum = expand_to_target_dim(loss_mask_sum, target_shape)
@@ -371,6 +403,7 @@ def preprocess_loss_inputs(
 
 
 def postprocess_loss_metric(metrics_data: dict) -> dict:
+    """Detach tensor metrics so loggers receive plain Python numbers."""
     for k, v in metrics_data.items():
         if isinstance(v, torch.Tensor):
             metrics_data[k] = v.detach().item()
@@ -380,6 +413,7 @@ def postprocess_loss_metric(metrics_data: dict) -> dict:
 
 
 def expand_to_target_dim(tensor, target_shape):
+    """Add trailing singleton dimensions until ``tensor`` can broadcast to target_shape."""
     if tensor is None:
         return None
     if tensor.shape != target_shape:
@@ -389,6 +423,7 @@ def expand_to_target_dim(tensor, target_shape):
 
 
 def safe_normalize(array, loss_mask):
+    """Normalize only valid entries while leaving invalid masked positions harmless."""
     valid_array = array[loss_mask]
     if len(valid_array) > 0:
         mean = valid_array.mean()
