@@ -1,0 +1,140 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900">
+  <defs>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%">
+      <feDropShadow dx="0" dy="3" stdDeviation="3" flood-color="#0f172a" flood-opacity="0.18"/>
+    </filter>
+    <marker id="arrowBlue" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#1d4ed8"/>
+    </marker>
+    <marker id="arrowPurple" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#9333ea"/>
+    </marker>
+    <style>
+      .title{font:700 34px Arial,'Noto Sans CJK SC','Microsoft YaHei',sans-serif;fill:#0f172a;letter-spacing:.2px}
+      .panel-title{font:700 20px Arial,'Noto Sans CJK SC','Microsoft YaHei',sans-serif;fill:#fff}
+      .node-title-blue{font:700 15px Arial,'Noto Sans CJK SC','Microsoft YaHei',sans-serif;fill:#1d4ed8}
+      .node-title-purple{font:700 15px Arial,'Noto Sans CJK SC','Microsoft YaHei',sans-serif;fill:#9333ea}
+      .body{font:400 13px Arial,'Noto Sans CJK SC','Microsoft YaHei',sans-serif;fill:#1f2937}
+      .path{font:400 11px 'JetBrains Mono','SFMono-Regular',Consolas,monospace;fill:#64748b}
+      .note{font:400 12px Arial,'Noto Sans CJK SC','Microsoft YaHei',sans-serif;fill:#64748b}
+    </style>
+  </defs>
+
+  <rect x="0" y="0" width="1600" height="900" fill="#f8fafc"/>
+  <text class="title" x="800" y="56" text-anchor="middle">RLinf / RoboTwin Fine-tune Pipeline： VLA SFT 与 RL Fine-tune</text>
+
+  <rect x="54" y="108" width="700" height="730" rx="70" fill="#eff6ff" stroke="#1d4ed8" stroke-width="2"/>
+  <rect x="70" y="124" width="668" height="46" rx="7" fill="#1e40af" filter="url(#shadow)"/>
+  <text class="panel-title" x="404" y="154" text-anchor="middle">VLA Fine-tune / SFT（Full 或 LoRA）</text>
+
+  <rect x="846" y="108" width="700" height="730" rx="70" fill="#faf5ff" stroke="#9333ea" stroke-width="2"/>
+  <rect x="862" y="124" width="668" height="46" rx="7" fill="#7e22ce" filter="url(#shadow)"/>
+  <text class="panel-title" x="1196" y="154" text-anchor="middle">RL Fine-tune（Online Rollout + PPO/GAE）</text>
+
+  <!-- VLA / SFT nodes -->
+  <g id="vla-nodes">
+    <rect x="90" y="190" width="628" height="66" rx="10" fill="#fff" stroke="#1d4ed8" stroke-width="1.7" filter="url(#shadow)"/>
+    <text class="node-title-blue" x="404" y="212" text-anchor="middle">1. CLI 入口</text>
+    <text class="body" x="102" y="231">解析参数，选择 full SFT 或 LoRA SFT。</text>
+    <text class="path" x="102" y="246">scripts/train_robotwin_vla.py</text>
+    <text class="path" x="102" y="258">scripts/train_robotwin_vla_lora.py</text>
+
+    <rect x="90" y="274" width="628" height="66" rx="10" fill="#fff" stroke="#1d4ed8" stroke-width="1.7" filter="url(#shadow)"/>
+    <text class="node-title-blue" x="404" y="296" text-anchor="middle">2. Project Adapter</text>
+    <text class="body" x="102" y="315">把 RoboTwin 项目挂到通用 SFT 训练循环。</text>
+    <text class="path" x="102" y="330">projects/robotwin/cli/train_robotwin_vla*.py</text>
+    <text class="path" x="102" y="342">adapters/sft_task.py</text>
+
+    <rect x="90" y="358" width="628" height="66" rx="10" fill="#fff" stroke="#1d4ed8" stroke-width="1.7" filter="url(#shadow)"/>
+    <text class="node-title-blue" x="404" y="380" text-anchor="middle">3. Dataset + Transform</text>
+    <text class="body" x="102" y="399">读取 LeRobot/RoboTwin 数据，接入 OpenPI dataconfig 和 normalize transform。</text>
+    <text class="path" x="102" y="414">adapters/_sft_impl.py::_build_loader</text>
+    <text class="path" x="102" y="426">data/robotwin_v3_dataset.py</text>
+
+    <rect x="90" y="442" width="628" height="66" rx="10" fill="#fff" stroke="#1d4ed8" stroke-width="1.7" filter="url(#shadow)"/>
+    <text class="node-title-blue" x="404" y="464" text-anchor="middle">4. Model 构建</text>
+    <text class="body" x="102" y="483">加载 pi0.5/OpenPI checkpoint；LoRA 路径会注入 VLM 子树。</text>
+    <text class="path" x="102" y="498">adapters/_sft_impl.py::_build_model</text>
+    <text class="path" x="102" y="510">_apply_openpi_lora</text>
+
+    <rect x="90" y="526" width="628" height="66" rx="10" fill="#fff" stroke="#1d4ed8" stroke-width="1.7" filter="url(#shadow)"/>
+    <text class="node-title-blue" x="404" y="548" text-anchor="middle">5. Supervised Loss</text>
+    <text class="body" x="102" y="567">行为克隆目标： $\mathcal{L}_{SFT}=\frac{1}{N}\sum_i \ell(f_\theta(o_i), a_i)$</text>
+    <text class="path" x="102" y="582">training/sft/trainer.py</text>
+    <text class="path" x="102" y="594">adapters/sft_task.py::forward_loss</text>
+
+    <rect x="90" y="610" width="628" height="66" rx="10" fill="#fff" stroke="#1d4ed8" stroke-width="1.7" filter="url(#shadow)"/>
+    <text class="node-title-blue" x="404" y="632" text-anchor="middle">6. Optim + Save/Eval</text>
+    <text class="body" x="102" y="651">AdamW、grad accumulation、cosine LR；按 step 保存并可周期评估。</text>
+    <text class="path" x="102" y="666">training/sft/trainer.py</text>
+    <text class="path" x="102" y="678">_save_checkpoint / _run_periodic_eval</text>
+
+    <rect x="90" y="694" width="628" height="66" rx="10" fill="#fff" stroke="#1d4ed8" stroke-width="1.7" filter="url(#shadow)"/>
+    <text class="node-title-blue" x="404" y="716" text-anchor="middle">7. 输出</text>
+    <text class="body" x="102" y="735">得到可被 eval / RL 继续加载的 SFT checkpoint。</text>
+    <text class="path" x="102" y="750">output_dir/model_state_dict/full_weights.pt</text>
+    <text class="path" x="102" y="762">checkpoints/step_xxxxxxx</text>
+
+    <line x1="404" y1="256" x2="404" y2="272" stroke="#1d4ed8" stroke-width="2" marker-end="url(#arrowBlue)"/>
+    <line x1="404" y1="340" x2="404" y2="356" stroke="#1d4ed8" stroke-width="2" marker-end="url(#arrowBlue)"/>
+    <line x1="404" y1="424" x2="404" y2="440" stroke="#1d4ed8" stroke-width="2" marker-end="url(#arrowBlue)"/>
+    <line x1="404" y1="508" x2="404" y2="524" stroke="#1d4ed8" stroke-width="2" marker-end="url(#arrowBlue)"/>
+    <line x1="404" y1="592" x2="404" y2="608" stroke="#1d4ed8" stroke-width="2" marker-end="url(#arrowBlue)"/>
+    <line x1="404" y1="676" x2="404" y2="692" stroke="#1d4ed8" stroke-width="2" marker-end="url(#arrowBlue)"/>
+  </g>
+
+  <!-- RL nodes -->
+  <g id="rl-nodes">
+    <rect x="882" y="190" width="628" height="66" rx="10" fill="#fff" stroke="#9333ea" stroke-width="1.7" filter="url(#shadow)"/>
+    <text class="node-title-purple" x="1196" y="212" text-anchor="middle">1. CLI 入口</text>
+    <text class="body" x="894" y="231">从 SFT checkpoint 启动本地在线 RL fine-tune。</text>
+    <text class="path" x="894" y="246">scripts/train_robotwin_local_rl.py</text>
+    <text class="path" x="894" y="258">cli/train_robotwin_local_rl.py</text>
+
+    <rect x="882" y="274" width="628" height="66" rx="10" fill="#fff" stroke="#9333ea" stroke-width="1.7" filter="url(#shadow)"/>
+    <text class="node-title-purple" x="1196" y="296" text-anchor="middle">2. Project Adapter</text>
+    <text class="body" x="894" y="315">通用 RL 入口调用 RoboTwin RL 实现。</text>
+    <text class="path" x="894" y="330">adapters/rl_task.py</text>
+    <text class="path" x="894" y="342">training/rl/runner.py</text>
+
+    <rect x="882" y="358" width="628" height="66" rx="10" fill="#fff" stroke="#9333ea" stroke-width="1.7" filter="url(#shadow)"/>
+    <text class="node-title-purple" x="1196" y="380" text-anchor="middle">3. Config + Env + Model</text>
+    <text class="body" x="894" y="399">Hydra compose 配置，加载模型，创建 RoboTwinEnv。</text>
+    <text class="path" x="894" y="414">adapters/_rl_impl.py::compose_cfg</text>
+    <text class="path" x="894" y="426">envs/robotwin/robotwin_env.py</text>
+
+    <rect x="882" y="442" width="628" height="66" rx="10" fill="#fff" stroke="#9333ea" stroke-width="1.7" filter="url(#shadow)"/>
+    <text class="node-title-purple" x="1196" y="464" text-anchor="middle">4. Rollout 收集</text>
+    <text class="body" x="894" y="483">policy 预测 action chunk，与环境交互，记录 reward/done/logprob/value。</text>
+    <text class="path" x="894" y="498">adapters/_rl_impl.py::collect_rollout</text>
+    <text class="path" x="894" y="510">env_interact_step</text>
+
+    <rect x="882" y="526" width="628" height="66" rx="10" fill="#fff" stroke="#9333ea" stroke-width="1.7" filter="url(#shadow)"/>
+    <text class="node-title-purple" x="1196" y="548" text-anchor="middle">5. Advantage 准备</text>
+    <text class="body" x="894" y="567">整理 batch 并计算 $\hat{A}_t$ / return；常用 GAE： $\hat{A}_t=\sum_l(\gamma\lambda)^l\delta_{t+l}$</text>
+    <text class="path" x="894" y="582">training/rl/batch.py</text>
+    <text class="path" x="894" y="594">algorithms/registry.py / utils.py</text>
+
+    <rect x="882" y="610" width="628" height="66" rx="10" fill="#fff" stroke="#9333ea" stroke-width="1.7" filter="url(#shadow)"/>
+    <text class="node-title-purple" x="1196" y="632" text-anchor="middle">6. Policy Update</text>
+    <text class="body" x="894" y="651">PPO clip： $\mathcal{L}_{clip}=\mathbb{E}[\min(r_t\hat{A}_t,\mathrm{clip}(r_t,1-\epsilon,1+\epsilon)\hat{A}_t)]$</text>
+    <text class="path" x="894" y="666">training/rl/update.py</text>
+    <text class="path" x="894" y="678">algorithms/losses.py::policy_loss</text>
+
+    <rect x="882" y="694" width="628" height="66" rx="10" fill="#fff" stroke="#9333ea" stroke-width="1.7" filter="url(#shadow)"/>
+    <text class="node-title-purple" x="1196" y="716" text-anchor="middle">7. 输出</text>
+    <text class="body" x="894" y="735">保存 RL checkpoint、history.jsonl、eval 指标。</text>
+    <text class="path" x="894" y="750">adapters/_rl_impl.py::save_checkpoint</text>
+    <text class="path" x="894" y="762">training/rl/metrics.py</text>
+
+    <line x1="1196" y1="256" x2="1196" y2="272" stroke="#9333ea" stroke-width="2" marker-end="url(#arrowPurple)"/>
+    <line x1="1196" y1="340" x2="1196" y2="356" stroke="#9333ea" stroke-width="2" marker-end="url(#arrowPurple)"/>
+    <line x1="1196" y1="424" x2="1196" y2="440" stroke="#9333ea" stroke-width="2" marker-end="url(#arrowPurple)"/>
+    <line x1="1196" y1="508" x2="1196" y2="524" stroke="#9333ea" stroke-width="2" marker-end="url(#arrowPurple)"/>
+    <line x1="1196" y1="592" x2="1196" y2="608" stroke="#9333ea" stroke-width="2" marker-end="url(#arrowPurple)"/>
+    <line x1="1196" y1="676" x2="1196" y2="692" stroke="#9333ea" stroke-width="2" marker-end="url(#arrowPurple)"/>
+  </g>
+
+  <rect x="54" y="846" width="1492" height="32" rx="4" fill="#fff" stroke="#cbd5e1" stroke-width="1" filter="url(#shadow)"/>
+  <text class="note" x="800" y="867" text-anchor="middle">README 建议放置位置：在“基本使用示例”之后新增 “Fine-tune Pipeline” 小节；这张图可作为该小节总览。</text>
+</svg>
