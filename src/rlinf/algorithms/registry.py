@@ -12,6 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Central registries that decouple algorithm names from concrete functions.
+
+Training code calls the unified entry points below with config-selected names
+(e.g. ``adv_type`` or ``loss_type``).  This file is therefore the thin dispatch
+layer between high-level configs and the task-specific implementations in
+``advantages.py``, ``losses.py``, and ``loss_scales.py``.
+"""
+
 from functools import wraps
 from typing import Callable, Optional
 
@@ -27,6 +35,8 @@ from rlinf.algorithms.utils import (
     preprocess_reasoning_advantages_inputs,
 )
 
+# Maps config-visible advantage names to callable implementations. Keeping this
+# global makes adding a new advantage estimator as simple as decorating a function.
 ADV_REGISTRY: dict[str, Callable] = {}
 
 
@@ -53,6 +63,8 @@ def get_adv_and_returns(name: str) -> Callable:
     return ADV_REGISTRY[name.lower()]
 
 
+# Policy-loss registry follows the same pattern as advantage functions so that
+# runners do not need hard-coded if/else branches for PPO, GRPO, or variants.
 LOSS_REGISTRY: dict[str, Callable] = {}
 
 
@@ -83,11 +95,15 @@ def policy_loss(**kwargs) -> tuple[torch.Tensor, dict]:
 
     task_type = kwargs["task_type"]
     if task_type == "embodied":
+        # Embodied data often has action-chunk / token-level shapes, so normalize
+        # it into the tensor convention expected by the generic loss functions.
         kwargs = preprocess_loss_inputs(**kwargs)
 
     loss, metrics_data = loss_fn(**kwargs)
 
     if task_type == "embodied":
+        # Convert embodied-specific metric tensors back to the logging convention
+        # consumed by the rest of the RLinf trainer.
         metrics_data = postprocess_loss_metric(metrics_data)
     return loss, metrics_data
 
@@ -105,19 +121,23 @@ def calculate_adv_and_returns(**kwargs) -> tuple[torch.Tensor, Optional[torch.Te
     if task_type == "embodied":
         kwargs = preprocess_embodied_advantages_inputs(**kwargs)
         if adv_type != "gae":
+            # Non-GAE embodied algorithms receive final trajectory scores first;
+            # GAE keeps dense rewards and critic values for temporal bootstrapping.
             kwargs = calculate_scores(**kwargs)
         advantages, returns = fn(**kwargs)
         res = postprocess_embodied_advantages_outputs(
             advantages=advantages, returns=returns, **kwargs
         )
     else:
-        # reasoning tasks
+        # Reasoning tasks use sequence-level reward layouts, so they go through a
+        # different shape adapter before sharing the same algorithm registry.
         kwargs = preprocess_reasoning_advantages_inputs(**kwargs)
         advantages, returns = fn(**kwargs)
         res = postprocess_reasoning_advantages_outputs(advantages, returns)
     return res
 
 
+# Optional post-processors that rescale losses, usually selected from config.
 LOSS_SCALE_REGISTRY: dict[str, Callable] = {}
 
 
@@ -138,6 +158,8 @@ def get_loss_scales(names: list[str]) -> list[Callable]:
     return loss_scales
 
 
+# Tool-call parsing is optional in this minimal vendor copy; keep the registry so
+# external users get an explicit error instead of a silent missing dependency.
 TOOLCALL_PARSER_REGISTRY: dict[str, Callable] = {}
 
 
