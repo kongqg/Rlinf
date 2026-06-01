@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""本地训练 / FSDP 训练共用的分布式上下文工具。"""
+
 from dataclasses import dataclass
 from datetime import timedelta
 import os
@@ -12,6 +14,8 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class DistributedContext:
+    """当前训练进程的分布式状态快照。"""
+
     backend: Literal["none", "fsdp"]
     rank: int = 0
     world_size: int = 1
@@ -19,14 +23,17 @@ class DistributedContext:
 
     @property
     def is_distributed(self) -> bool:
+        """是否处在 torchrun / FSDP 这类多进程训练模式下。"""
         return self.backend != "none"
 
     @property
     def is_main(self) -> bool:
+        """rank 0 负责主日志、保存等只需要执行一次的操作。"""
         return self.rank == 0
 
 
 def init_distributed(args) -> DistributedContext:
+    """根据启动参数和 torchrun 环境变量初始化分布式进程组。"""
     import torch
     import torch.distributed as dist
 
@@ -38,6 +45,7 @@ def init_distributed(args) -> DistributedContext:
     if not torch.cuda.is_available():
         raise RuntimeError("FSDP training requires CUDA.")
 
+    # torchrun 会注入这些环境变量；这里统一读出来形成 DistributedContext。
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     rank = int(os.environ.get("RANK", "0"))
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
@@ -53,6 +61,7 @@ def init_distributed(args) -> DistributedContext:
         )
 
     if not dist.is_initialized():
+        # 每个进程先绑定自己的 local GPU，再初始化 NCCL，避免不同进程抢同一张卡。
         torch.cuda.set_device(local_rank)
         dist.init_process_group(
             backend="nccl",
@@ -68,6 +77,7 @@ def init_distributed(args) -> DistributedContext:
 
 
 def reduce_mean(value: "torch.Tensor", dist_ctx: DistributedContext) -> "torch.Tensor":
+    """在所有 rank 上求均值；非分布式模式下直接返回 detach 后的值。"""
     import torch.distributed as dist
 
     if not dist_ctx.is_distributed:
@@ -79,6 +89,7 @@ def reduce_mean(value: "torch.Tensor", dist_ctx: DistributedContext) -> "torch.T
 
 
 def destroy_distributed(dist_ctx: DistributedContext, *, success: bool) -> None:
+    """训练结束时销毁进程组；成功结束时先 barrier，避免某些 rank 提前退出。"""
     import torch.distributed as dist
 
     if dist_ctx.is_distributed and dist.is_initialized():
