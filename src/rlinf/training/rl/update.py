@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-"""Local RL optimization loop.
+"""本地 RL 优化更新循环。
 
-This module consumes a prepared rollout batch, reshapes it into shuffled global
-and micro batches, recomputes current-policy logprobs, and applies the configured
-policy/value loss with gradient accumulation.
+本模块接收已经准备好的 rollout batch，将其整理成 shuffle 后的 global batch
+和 micro batch，重新计算当前策略 logprob，并用配置指定的 policy / value loss
+完成梯度累积和参数更新。
 """
 
 from collections import defaultdict
@@ -27,12 +27,11 @@ def run_update(
     *,
     debug_stage_logs: bool,
 ):
-    """Run PPO/GRPO-style updates over one rollout buffer."""
+    """在一个 rollout buffer 上执行 PPO / GRPO 风格的多轮更新。"""
     rollout_size = (
         rollout_batch["prev_logprobs"].shape[0] * rollout_batch["prev_logprobs"].shape[1]
     )
-    # Shuffle after rollout collection so each optimizer step mixes trajectories
-    # instead of seeing environment streams in their original order.
+    # rollout 收集完成后再打乱，避免优化器按原始环境流顺序连续看到相邻轨迹。
     shuffle_id = torch.randperm(rollout_size)
     train_batch = process_nested_dict_for_train(rollout_batch, shuffle_id)
 
@@ -53,8 +52,7 @@ def run_update(
 
     model.train()
     for _ in range(cfg.algorithm.update_epoch):
-        # First split into global optimizer batches, then into micro-batches for
-        # memory-safe gradient accumulation.
+        # 先切成 global optimizer batch，再切成 micro-batch 做显存友好的梯度累积。
         global_batches = split_dict_to_chunk(
             train_batch, rollout_size // batch_size_per_rank
         )
@@ -77,8 +75,8 @@ def run_update(
                     use_cache=False,
                 )
 
-                # Keep the update loop algorithm-agnostic: the registry decides
-                # whether this is PPO, decoupled PPO, or another registered loss.
+                # update loop 本身不关心具体算法；registry 会根据配置选择 PPO、
+                # decoupled PPO 或其他已经注册的 loss。
                 loss_kwargs = {
                     "loss_type": cfg.algorithm.loss_type,
                     "logprob_type": cfg.algorithm.logprob_type,
@@ -107,15 +105,14 @@ def run_update(
                     entropy = output_dict["entropy"]
                     loss_mask = batch.get("loss_mask", None)
                     entropy_loss = masked_mean(entropy, loss_mask)
-                    # Entropy is maximized, so subtract it from the minimized loss.
+                    # entropy 是希望最大化的正则项，因此在最小化总 loss 时要减掉它。
                     loss = loss - cfg.algorithm.entropy_bonus * entropy_loss
                 metric_dict["actor/entropy_loss"] = float(entropy_loss.detach().item())
 
                 for key, value in metric_dict.items():
                     metrics[key].append(float(value))
 
-                # Divide by accumulation steps so the summed micro-batch gradients
-                # match one global-batch gradient scale.
+                # 除以累积步数，保证多个 micro-batch 累加后的梯度尺度等价于一个 global batch。
                 (loss / gradient_accumulation).backward()
 
             grad_norm = torch.nn.utils.clip_grad_norm_(
